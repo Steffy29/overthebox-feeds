@@ -1,0 +1,127 @@
+#!/bin/sh
+# shellcheck disable=SC1090,SC1091,SC1066,SC1087,SC2086
+# vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4 :
+acs_url=192.168.100.10:8080
+set -e
+
+. /lib/overthebox
+
+_call_acs() {
+	curl -s -m 10 --fail "$acs_url/device/$OTB_DEVICE_ID/$1"
+}
+
+_check_connect_acs() {
+	curl -s -m 10 --fail "$acs_url/ping" > /dev/null
+}
+
+_find_rule_index() {
+	rule="$1"
+	conf_id="$2"
+
+	found=false
+	i=0
+	id=
+	while true; do
+		uci show "$rule[$i]" > /dev/null 2>&1 || break
+		id="$(uci get "$rule[$i].id" 2>/dev/null || true)"
+		if [ "$id" = "$conf_id" ]; then
+			found=true
+			break
+		fi
+		i=$((i+1))
+	done
+
+	if [ "$found" = false ]; then
+		echo "-1"
+	else
+		echo "$i"
+	fi
+}
+
+_get_conf() {
+	uci_path="$1"
+	url="$2"
+	uci_cmd="$3"
+
+	ret="$(_call_acs "$url")" || {
+		return
+	}
+
+	juci_cmd="$(echo "$uci_cmd" | tr " " ".")"
+
+	rhash="$(echo "$ret" | md5sum | cut -d" " -f1)"
+	lhash="$(uci get "$juci_cmd""_hash" 2> /dev/null)"
+
+	# Check if conf has already been applied
+	if [ "$rhash" = "$lhash" ]; then
+		return
+	fi
+
+	uci set "$juci_cmd""_hash=$rhash"
+	uci commit "$juci_cmd""_hash=$rhash"
+
+	# Set the new rules
+	echo "$ret" | jq -r -c ".[]" | while read -r conf; do
+		conf_id="$(echo "$conf" | jq -r .id )"
+		i="$(_find_rule_index "$uci_path" "$conf_id")"
+
+		if [ "$i" -eq "-1" ]; then
+			echo "Rule does not exist, creating"
+
+			# Intentional word splitting
+			uci add $uci_cmd > /dev/null
+		fi
+
+		# Map key to value
+		echo "$conf" | jq -r --arg index "$i" --arg ucipath "$uci_path"  'to_entries | .[] | @text "set \($ucipath)[\($index)].\(.key)=\"\(.value)\""' | uci -q batch
+	done
+
+	# Delete undefined rules
+	i=0
+	while true; do
+		# We finished iterating over all rules
+		uci show "$uci_path[$i]" > /dev/null 2>&1 || break
+
+		id=$(uci get "$uci_path[$i].id" 2> /dev/null)
+		if [ -z "$id" ]; then
+			uci delete "$uci_path[$i]"
+			continue
+		fi
+
+		# Check if id is in remote config
+		if ! echo "$ret" | jq -e -r --arg id "$id" '[.[].id] | index("\($id)")' > /dev/null; then
+			echo "Not in remote config: deleting"
+			uci delete "$uci_path[$i]"
+			continue
+		fi
+
+		i=$((i+1))
+	done
+
+	if ! _check_connect_acs; then
+		echo "New conf is breaking network, reversing"
+		uci revert "$(echo "$uci_cmd" | cut -d" " -f1)"
+
+		# TODO: Send the info to the provisionning
+		return
+	fi
+
+	uci commit
+}
+
+_run() {
+	otb_reload
+	export OTB_DEVICE_ID="2872bf39-2084-4c51-aa1e-ca053292f7f4"
+
+	_get_conf "firewall.@rule" "firewall/rules" "firewall rule"
+	_get_conf "firewall.@redirect" "firewall/redirects" "firewall redirect"
+	_get_conf "dhcp.@host" "dhcp/staticleases" "dhcp host"
+}
+
+RUNNING=1
+trap 'RUNNING=' INT QUIT TERM
+
+while [ "$RUNNING" ]; do
+	_run
+	sleep 1
+done
