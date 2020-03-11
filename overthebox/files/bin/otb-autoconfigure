@@ -2,7 +2,8 @@
 # shellcheck disable=SC1090,SC1091,SC1066,SC1087,SC2086
 # vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4 :
 acs_url=192.168.100.10:8080
-set -e
+#set -e
+#set -x
 
 . /lib/overthebox
 
@@ -11,8 +12,143 @@ _call_acs() {
 }
 
 _check_connect_acs() {
-	curl -s -m 10 --fail "$acs_url/ping" > /dev/null
+	uci_path="$1"
+
+	if [ -z "$(uci changes)" ]; then
+		return 0
+	fi
+
+	if ! curl -s -m 10 --fail "$acs_url/ping" > /dev/null; then
+		echo "New conf is breaking network, reversing"
+		uci revert "$(echo "$uci_path" | cut -d" " -f1)"
+		return 1
+	fi
 }
+
+_check_hash() {
+	uci_path="$1"
+	conf="$2"
+
+	# If it's an array, remote the @
+	hash_path="$(echo $uci_path | sed 's/\@//g')""_hash"
+
+	# Check if conf has already been applied
+	rhash="$(echo "$conf" | md5sum | cut -d" " -f1)"
+	lhash="$(uci get "$hash_path" 2> /dev/null)"
+
+	if [ "$rhash" = "$lhash" ]; then
+		return 1
+	fi
+
+	uci set "$hash_path=$rhash"
+	uci commit "$hash_path"
+	return 0
+}
+
+# Same as set_conf_static, but append $suffix_name in front of all keys
+_set_conf_single_dynamic() {
+	conf="$1"
+	uci_path="$2"
+	conf_type="$3"
+	suffix="$4"
+
+	echo "Iterating conf"
+	echo "$conf"
+
+	echo "$conf" | jq -r -c '.[]' | while read -r sconf; do
+		_set_conf_single_static "$sconf" "$uci_path.$suffix" "$conf_type"
+	done
+
+	echo "Done on single_dynamic"
+}
+
+# Takes an input as { "key": "value" } and apply it as an uci configuration on uci_path as "set uci_path.key=value"
+_set_conf_single_static() {
+	conf="$1"
+	uci_path="$2"
+	conf_type="$3"
+
+	# Check hash
+	if false &&  ! _check_hash "$uci_path" "$ret"; then
+		echo "hash is the same (static)"
+		return 1
+	fi
+
+	# Map key to value
+	uci set "$uci_path=$conf_type"
+	echo "$conf" | jq -r --arg ucipath "$uci_path"  'to_entries | .[] | @text "set \($ucipath).\(.key)=\"\(.value)\""' | uci -q batch
+
+	# No need to delete rules as they are deleted if set to ""
+}
+
+_add_prefix_entries() {
+	entries="$1"
+	prefix="$2"
+
+	echo "$entries" | jq --arg prefix "$prefix" 'to_entries |  map({($prefix + .key): (.value)}) | add'
+}
+
+_apply_remote_conf() {
+	uci_path="$1"
+	url="$2"
+	conf_type="$3"
+
+	# Get conf JSON
+	ret="$(_call_acs "$url")" || {
+		echo "Failed to retrieve remote conf"
+		return 1
+	}
+
+	# TODO: Do something better than this
+	if [ "$conf_type" = "array" ]; then
+		_set_conf_array "$ret" "$uci_path"
+
+	elif [ "$conf_type" = "network.interfaces" ]; then
+		_set_conf_network_interface "$ret"
+
+	elif [ "$conf_type" = "glorytun" ]; then
+		_set_conf_glorytun "$ret"
+
+	else
+		echo "Missing conf type"
+	fi
+
+	_check_connect_acs "$uci_path" || return
+
+	uci commit
+}
+
+_get_param() {
+	echo "$1" | jq -r "$2"
+}
+
+_set_conf_network_interface() {
+	conf="$1"
+
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		ifname="$(_get_param "$sconf" ".ifname")"
+		echo ifname is $ifname
+		echo "Setting in dynamic : $sconf"
+		_set_conf_single_static "$sconf" "network.$ifname" "interface"
+	done
+}
+
+_set_conf_glorytun() {
+	conf="$1"
+	sconf="$(echo $conf | jq -r '{
+		"dev": "\(.dev_name)",
+		"server": "\(.server)",
+		"port": "\(.port)",
+		"key": "\(.key)",
+		"id": "\(.id)",
+		"enable": 1
+	}')"
+
+	dev_name="$(echo $conf | jq -r  '.dev_name')"
+
+	_set_conf_single_static "$sconf" "glorytun.$dev_name" "mud"
+}
+
 
 _find_rule_index() {
 	rule="$1"
@@ -38,32 +174,28 @@ _find_rule_index() {
 	fi
 }
 
-_get_conf() {
-	uci_path="$1"
-	url="$2"
-	uci_cmd="$3"
+_set_conf_array() {
+	conf="$1"
 
-	ret="$(_call_acs "$url")" || {
-		return
-	}
+	# Is of shape: firewall.@rule
+	uci_path_array="$2"
 
-	juci_cmd="$(echo "$uci_cmd" | tr " " ".")"
+	# Convert to firewall.rule
+	uci_path="$(echo $uci_path_array | sed 's/\@//g')"
 
-	rhash="$(echo "$ret" | md5sum | cut -d" " -f1)"
-	lhash="$(uci get "$juci_cmd""_hash" 2> /dev/null)"
+	# Convert to firewall rule
+	uci_cmd="$(echo $uci_path | sed -n -r  's/(^[a-z]*)(\.)/\1 /p')"
 
-	# Check if conf has already been applied
-	if [ "$rhash" = "$lhash" ]; then
-		return
+	# Check hash
+	if ! _check_hash "$uci_path" "$ret"; then
+		echo "hash is the same"
+		return 1
 	fi
 
-	uci set "$juci_cmd""_hash=$rhash"
-	uci commit "$juci_cmd""_hash=$rhash"
-
 	# Set the new rules
-	echo "$ret" | jq -r -c ".[]" | while read -r conf; do
-		conf_id="$(echo "$conf" | jq -r .id )"
-		i="$(_find_rule_index "$uci_path" "$conf_id")"
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		conf_id="$(echo "$sconf" | jq -r .id )"
+		i="$(_find_rule_index "$uci_path_array" "$conf_id")"
 
 		if [ "$i" -eq "-1" ]; then
 			echo "Rule does not exist, creating"
@@ -73,55 +205,49 @@ _get_conf() {
 		fi
 
 		# Map key to value
-		echo "$conf" | jq -r --arg index "$i" --arg ucipath "$uci_path"  'to_entries | .[] | @text "set \($ucipath)[\($index)].\(.key)=\"\(.value)\""' | uci -q batch
+		echo "$sconf" | jq -r --arg index "$i" --arg ucipath "$uci_path_array"  'to_entries | .[] | @text "set \($ucipath)[\($index)].\(.key)=\"\(.value)\""' | uci -q batch
 	done
 
 	# Delete undefined rules
 	i=0
 	while true; do
 		# We finished iterating over all rules
-		uci show "$uci_path[$i]" > /dev/null 2>&1 || break
+		uci show "$uci_path_array[$i]" > /dev/null 2>&1 || break
 
-		id=$(uci get "$uci_path[$i].id" 2> /dev/null)
+		# If no id is defined, it's should not be there (system rule)
+		id=$(uci get "$uci_path_array[$i].id" 2> /dev/null)
 		if [ -z "$id" ]; then
 			uci delete "$uci_path[$i]"
 			continue
 		fi
 
-		# Check if id is in remote config
+		# Check if id is still present in remote config
 		if ! echo "$ret" | jq -e -r --arg id "$id" '[.[].id] | index("\($id)")' > /dev/null; then
-			echo "Not in remote config: deleting"
-			uci delete "$uci_path[$i]"
+			uci delete "$uci_path_array[$i]"
 			continue
 		fi
 
 		i=$((i+1))
 	done
-
-	if ! _check_connect_acs; then
-		echo "New conf is breaking network, reversing"
-		uci revert "$(echo "$uci_cmd" | cut -d" " -f1)"
-
-		# TODO: Send the info to the provisionning
-		return
-	fi
-
-	uci commit
 }
 
 _run() {
 	otb_reload
-	export OTB_DEVICE_ID="2872bf39-2084-4c51-aa1e-ca053292f7f4"
+	export OTB_DEVICE_ID="a5def614-0f23-4c17-a72b-f8d7704ce070"
 
-	_get_conf "firewall.@rule" "firewall/rules" "firewall rule"
-	_get_conf "firewall.@redirect" "firewall/redirects" "firewall redirect"
-	_get_conf "dhcp.@host" "dhcp/staticleases" "dhcp host"
+#	_apply_remote_conf "firewall.@rule" "firewall/rules" "array"
+#	_apply_remote_conf "dhcp.@host" "dhcp/staticleases" "array"
+#	_apply_remote_conf "firewall.@redirect" "firewall/redirects" "array"
+	#_apply_remote_conf "glorytun" "glorytun/tun" "glorytun" "dev_name"
+
+#	_apply_remote_conf "network" "network/interfaces" "network.interfaces" "dev_name"
 }
 
 RUNNING=1
 trap 'RUNNING=' INT QUIT TERM
 
 while [ "$RUNNING" ]; do
+	clear
 	_run
 	sleep 1
 done
