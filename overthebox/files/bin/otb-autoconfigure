@@ -109,6 +109,9 @@ _apply_remote_conf() {
 	elif [ "$conf_type" = "glorytun" ]; then
 		_set_conf_glorytun "$ret"
 
+	elif [ "$conf_type" = "dhcp.configs" ]; then
+		_set_conf_dhcp_config "$ret"
+
 	else
 		echo "Missing conf type"
 	fi
@@ -149,6 +152,23 @@ _set_conf_glorytun() {
 	_set_conf_single_static "$sconf" "glorytun.$dev_name" "mud"
 }
 
+_set_conf_dhcp_config() {
+	conf="$1"
+
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		ifname="$(echo $sconf | jq -r '.ifname')"
+		tconf="$(echo $sconf | jq -r '{
+			"interface": "\(.ifname)",
+			"start": "\(.start)",
+			"limit": "\(.end)",
+			"leasetime": "\(.lease_time)",
+			"force": 1,
+			"ra": 1
+		}')"
+
+		_set_conf_single_static "$tconf" "dhcp.$ifname" "dhcp"
+	done
+}
 
 _find_rule_index() {
 	rule="$1"
@@ -235,12 +255,13 @@ _run() {
 	otb_reload
 	export OTB_DEVICE_ID="a5def614-0f23-4c17-a72b-f8d7704ce070"
 
-#	_apply_remote_conf "firewall.@rule" "firewall/rules" "array"
-#	_apply_remote_conf "dhcp.@host" "dhcp/staticleases" "array"
-#	_apply_remote_conf "firewall.@redirect" "firewall/redirects" "array"
+	#_apply_remote_conf "firewall.@rule" "firewall/rules" "array"
+	#_apply_remote_conf "dhcp.@host" "dhcp/staticleases" "array"
+	#_apply_remote_conf "firewall.@redirect" "firewall/redirects" "array"
 	#_apply_remote_conf "glorytun" "glorytun/tun" "glorytun" "dev_name"
 
-#	_apply_remote_conf "network" "network/interfaces" "network.interfaces" "dev_name"
+	#_apply_remote_conf "network" "network/interfaces" "network.interfaces" "dev_name"
+	#_apply_remote_conf "dhcp" "dhcp/configs" "dhcp.configs"
 }
 
 RUNNING=1
