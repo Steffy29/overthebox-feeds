@@ -2,8 +2,6 @@
 # shellcheck disable=SC1090,SC1091,SC1066,SC1087,SC2086
 # vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4 :
 acs_url=192.168.100.10:8080
-#set -e
-#set -x
 
 . /lib/overthebox
 
@@ -112,6 +110,9 @@ _apply_remote_conf() {
 	elif [ "$conf_type" = "dhcp.configs" ]; then
 		_set_conf_dhcp_config "$ret"
 
+	elif [ "$conf_type" = "dns.nameservers" ]; then
+		_set_conf_dns_nameserver "$ret"
+
 	else
 		echo "Missing conf type"
 	fi
@@ -170,6 +171,22 @@ _set_conf_dhcp_config() {
 	done
 }
 
+_set_conf_dns_nameserver() {
+	conf="$1"
+
+	# Change .address to .server
+	sconf="$(echo "$conf" | jq -r '[.[].address]')"
+
+	_set_conf_list "$sconf" "dhcp.@dnsmasq[0].server"
+	echo "OK"
+}
+
+# Converts an array element to a constant name
+# Eg: dhcp.@dnsmasq[-1] -> dhcp.cfg01411c
+_find_rule_const_name() {
+	uci show "$1" | cut -d"=" -f1 | head -n1
+}
+
 _find_rule_index() {
 	rule="$1"
 	conf_id="$2"
@@ -194,6 +211,23 @@ _find_rule_index() {
 	fi
 }
 
+# _set_conf_list sets conf as uci list
+# conf: array of values eg: [ "value1", "value2" ]
+# path: path of the list eg: dhcp.@dnsmasq[0].server
+_set_conf_list() {
+	conf="$1"
+	path="$2"
+
+	# Delete the list before adding values
+	uci set "$path="
+
+	echo "$conf" | jq -r '.[]' | while read -r value; do
+		echo uci add_list "$path=$value"
+		uci add_list "$path=$value"
+	done
+}
+
+# _set_conf_array sets conf in an array
 _set_conf_array() {
 	conf="$1"
 
@@ -262,6 +296,7 @@ _run() {
 
 	#_apply_remote_conf "network" "network/interfaces" "network.interfaces" "dev_name"
 	#_apply_remote_conf "dhcp" "dhcp/configs" "dhcp.configs"
+	_apply_remote_conf "dhcp" "dns/nameservers" "dns.nameservers"
 }
 
 RUNNING=1
