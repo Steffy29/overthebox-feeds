@@ -1,7 +1,8 @@
 #!/bin/sh
-# shellcheck disable=SC1090,SC1091,SC1066,SC1087,SC2086
-# vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4 :
+# shellcheck disable=SC1090,SC1091,SC1066,SC1087,SC2086,SC2016
+# vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4:
 acs_url=192.168.100.10:8080
+acs_hash_path=/tmp/acs_hash
 
 . /lib/overthebox
 
@@ -27,20 +28,21 @@ _check_hash() {
 	uci_path="$1"
 	conf="$2"
 
-	# If it's an array, remote the @
-	hash_path="$(echo $uci_path | sed 's/\@//g')""_hash"
+	escaped_path="$(printf "%s" "$uci_path" | sed 's/[.[\*^$()+?{|]/\\&/g')"
 
-	# Check if conf has already been applied
 	rhash="$(echo "$conf" | md5sum | cut -d" " -f1)"
-	lhash="$(uci get "$hash_path" 2> /dev/null)"
+	lhash="$(grep "$escaped_path" "$acs_hash_path" | cut -d";" -f2)"
 
 	if [ "$rhash" = "$lhash" ]; then
 		return 1
 	fi
 
-	uci set "$hash_path=$rhash"
-	uci commit "$hash_path"
-	return 0
+	# Remove the hash if exists
+	tmp_file="$(mktemp)"
+	awk "!/$escaped_path/{print}" "$acs_hash_path" > "$tmp_file"
+	mv "$tmp_file" "$acs_hash_path"
+
+	echo "$uci_path;$rhash" >> "$acs_hash_path"
 }
 
 # Same as set_conf_static, but append $suffix_name in front of all keys
@@ -67,7 +69,7 @@ _set_conf_single_static() {
 	conf_type="$3"
 
 	# Check hash
-	if false &&  ! _check_hash "$uci_path" "$ret"; then
+	if ! _check_hash "$uci_path" "$ret"; then
 		echo "hash is the same (static)"
 		return 1
 	fi
@@ -122,15 +124,11 @@ _apply_remote_conf() {
 	uci commit
 }
 
-_get_param() {
-	echo "$1" | jq -r "$2"
-}
-
 _set_conf_network_interface() {
 	conf="$1"
 
 	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
-		ifname="$(_get_param "$sconf" ".ifname")"
+		ifname="$(echo "$sconf" | jq -r ".ifname")"
 		echo ifname is $ifname
 		echo "Setting in dynamic : $sconf"
 		_set_conf_single_static "$sconf" "network.$ifname" "interface"
@@ -216,14 +214,19 @@ _find_rule_index() {
 # path: path of the list eg: dhcp.@dnsmasq[0].server
 _set_conf_list() {
 	conf="$1"
-	path="$2"
+	uci_path="$2"
+
+	echo "$uci_path"
+	if ! _check_hash "$uci_path" "$conf"; then
+		return 1
+	fi
 
 	# Delete the list before adding values
-	uci set "$path="
+	uci set "$uci_path="
 
 	echo "$conf" | jq -r '.[]' | while read -r value; do
-		echo uci add_list "$path=$value"
-		uci add_list "$path=$value"
+		echo uci add_list "$uci_path=$value"
+		uci add_list "$uci_path=$value"
 	done
 }
 
@@ -298,6 +301,8 @@ _run() {
 	#_apply_remote_conf "dhcp" "dhcp/configs" "dhcp.configs"
 	_apply_remote_conf "dhcp" "dns/nameservers" "dns.nameservers"
 }
+
+touch "$acs_hash_path"
 
 RUNNING=1
 trap 'RUNNING=' INT QUIT TERM
