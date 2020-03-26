@@ -47,21 +47,27 @@ _check_hash() {
 	echo "$uci_path;$rhash" >> "$acs_hash_path"
 }
 
-# Same as set_conf_static, but append $suffix_name in front of all keys
-_set_conf_single_dynamic() {
+# TODO: Rewrite the json to ensure that we only keep the good fields
+_set_conf_firewall_rules() {
 	conf="$1"
-	uci_path="$2"
-	conf_type="$3"
-	suffix="$4"
 
-	echo "Iterating conf"
 	echo "$conf"
 
-	echo "$conf" | jq -r -c '.[]' | while read -r sconf; do
-		_set_conf_single_static "$sconf" "$uci_path.$suffix" "$conf_type"
-	done
+	_set_conf_array "$conf" "firewall.@rule"
+}
 
-	echo "Done on single_dynamic"
+# TODO: Rewrite the json to ensure that we only keep the good fields
+_set_conf_firewall_redirects() {
+	conf="$1"
+
+	_set_conf_array "$conf" "firewall.@redirect"
+}
+
+# TODO: Rewrite the json to ensure that we only keep the good fields
+_set_conf_dhcp_staticleases() {
+	conf="$1"
+
+	_set_conf_array "$conf" "dhcp.@host"
 }
 
 # Takes an input as { "key": "value" } and apply it as an uci configuration on uci_path as "set uci_path.key=value"
@@ -91,9 +97,7 @@ _add_prefix_entries() {
 }
 
 _apply_remote_conf() {
-	uci_path="$1"
-	url="$2"
-	conf_type="$3"
+	url="$1"
 
 	# Get conf JSON
 	ret="$(_call_acs "$url")" || {
@@ -102,22 +106,28 @@ _apply_remote_conf() {
 	}
 
 	# TODO: Do something better than this
-	if [ "$conf_type" = "array" ]; then
-		_set_conf_array "$ret" "$uci_path"
+	if [ "$url" = "dhcp/staticleases" ]; then
+		_set_conf_dhcp_staticleases "$ret"
 
-	elif [ "$conf_type" = "network.interfaces" ]; then
+	elif [ "$url" = "firewall/rules" ]; then
+		_set_conf_firewall_rules "$ret"
+
+	elif [ "$url" = "firewall/redirects" ]; then
+		_set_conf_firewall_redirects "$ret"
+
+	elif [ "$url" = "network/interfaces" ]; then
 		_set_conf_network_interface "$ret"
 
-	elif [ "$conf_type" = "network.routes6" ]; then
+	elif [ "$url" = "network/routes6" ]; then
 		_set_conf_network_routes6 "$ret"
 
-	elif [ "$conf_type" = "glorytun" ]; then
+	elif [ "$url" = "glorytun/tun" ]; then
 		_set_conf_glorytun "$ret"
 
-	elif [ "$conf_type" = "dhcp.configs" ]; then
+	elif [ "$url" = "dhcp/configs" ]; then
 		_set_conf_dhcp_config "$ret"
 
-	elif [ "$conf_type" = "dns.nameservers" ]; then
+	elif [ "$url" = "dns/nameservers" ]; then
 		_set_conf_dns_nameserver "$ret"
 
 	else
@@ -255,7 +265,7 @@ _set_conf_list() {
 	done
 }
 
-# _set_conf_array sets conf in an array
+# _set_conf_array sets conf in an array TODO: Improve this, seems a bit too hacky
 _set_conf_array() {
 	conf="$1"
 
@@ -317,24 +327,21 @@ _run() {
 	otb_reload
 	export OTB_DEVICE_ID="a5def614-0f23-4c17-a72b-f8d7704ce070"
 
-	#_apply_remote_conf "firewall.@rule" "firewall/rules" "array"
-	#_apply_remote_conf "dhcp.@host" "dhcp/staticleases" "array"
-	#_apply_remote_conf "firewall.@redirect" "firewall/redirects" "array"
-	#_apply_remote_conf "glorytun" "glorytun/tun" "glorytun" "dev_name"
-
-	#_apply_remote_conf "network" "network/interfaces" "network.interfaces" "dev_name"
-	#_apply_remote_conf "dhcp" "dhcp/configs" "dhcp.configs"
-	#_apply_remote_conf "dhcp" "dns/nameservers" "dns.nameservers"
-	#_apply_remote_conf "network" "network/routes6" "network.routes6"
+	#_apply_remote_conf  "firewall/rules"
+	#_apply_remote_conf  "dhcp/staticleases"
+	#_apply_remote_conf  "firewall/redirects"
+	#_apply_remote_conf  "glorytun/tun"
+	#_apply_remote_conf  "network/interfaces"
+	#_apply_remote_conf  "dhcp/configs"
+	#_apply_remote_conf  "dns/nameservers"
+	#_apply_remote_conf  "network/routes6"
 }
-
-touch "$acs_hash_path"
 
 RUNNING=1
 trap 'RUNNING=' INT QUIT TERM
 
 while [ "$RUNNING" ]; do
-	clear
+	#clear
 	_run
 	sleep 1
 done
