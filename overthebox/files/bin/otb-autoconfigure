@@ -51,8 +51,6 @@ _check_hash() {
 _set_conf_firewall_rules() {
 	conf="$1"
 
-	echo "$conf"
-
 	_set_conf_array "$conf" "firewall.@rule"
 }
 
@@ -106,29 +104,32 @@ _apply_remote_conf() {
 	}
 
 	# TODO: Do something better than this
-	if [ "$url" = "dhcp/staticleases" ]; then
-		_set_conf_dhcp_staticleases "$ret"
-
-	elif [ "$url" = "firewall/rules" ]; then
-		_set_conf_firewall_rules "$ret"
-
-	elif [ "$url" = "firewall/redirects" ]; then
-		_set_conf_firewall_redirects "$ret"
-
-	elif [ "$url" = "network/interfaces" ]; then
-		_set_conf_network_interface "$ret"
-
-	elif [ "$url" = "network/routes6" ]; then
-		_set_conf_network_routes6 "$ret"
-
-	elif [ "$url" = "glorytun/tun" ]; then
-		_set_conf_glorytun "$ret"
-
-	elif [ "$url" = "dhcp/configs" ]; then
+	if [ "$url" = "dhcp/configs" ]; then
 		_set_conf_dhcp_config "$ret"
 
 	elif [ "$url" = "dns/nameservers" ]; then
 		_set_conf_dns_nameserver "$ret"
+
+	elif [ "$url" = "dhcp/staticleases" ]; then
+		_set_conf_dhcp_staticleases "$ret"
+
+	elif [ "$url" = "firewall/redirects" ]; then
+		_set_conf_firewall_redirects "$ret"
+
+	elif [ "$url" = "firewall/rules" ]; then
+		_set_conf_firewall_rules "$ret"
+
+	elif [ "$url" = "glorytun/tun" ]; then
+		_set_conf_glorytun "$ret"
+
+	elif [ "$url" = "network/interfaces" ]; then
+		_set_conf_network_interface "$ret"
+
+	elif [ "$url" = "network/routes4" ]; then
+		_set_conf_network_routes4 "$ret"
+
+	elif [ "$url" = "network/routes6" ]; then
+		_set_conf_network_routes6 "$ret"
 
 	else
 		echo "Missing conf type"
@@ -212,12 +213,6 @@ _set_conf_dns_nameserver() {
 
 	_set_conf_list "$sconf" "dhcp.@dnsmasq[0].server"
 	echo "OK"
-}
-
-# Converts an array element to a constant name
-# Eg: dhcp.@dnsmasq[-1] -> dhcp.cfg01411c
-_find_rule_const_name() {
-	uci show "$1" | cut -d"=" -f1 | head -n1
 }
 
 _find_rule_index() {
@@ -327,7 +322,7 @@ _run() {
 	otb_reload
 	export OTB_DEVICE_ID="a5def614-0f23-4c17-a72b-f8d7704ce070"
 
-	#_apply_remote_conf  "firewall/rules"
+	_apply_remote_conf  "firewall/rules"
 	#_apply_remote_conf  "dhcp/staticleases"
 	#_apply_remote_conf  "firewall/redirects"
 	#_apply_remote_conf  "glorytun/tun"
