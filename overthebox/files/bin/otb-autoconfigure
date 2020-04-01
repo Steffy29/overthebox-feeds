@@ -53,6 +53,131 @@ _check_hash() {
 	echo "$uci_path;$rhash" >> "$acs_hash_path"
 }
 
+# Takes an input as { "key": "value" } and apply it as an uci configuration on uci_path as "set uci_path.key=value"
+_set_conf_single_static() {
+	conf="$1"
+	uci_path="$2"
+	conf_type="$3"
+
+	# Check hash
+	if ! _check_hash "$uci_path" "$ret"; then
+		return 1
+	fi
+
+	_log "Updating $uci_path"
+
+	# Map key to value
+	uci set "$uci_path=$conf_type"
+	echo "$conf" | jq -r --arg ucipath "$uci_path"  'to_entries | .[] | @text "set \($ucipath).\(.key)=\"\(.value)\""' | uci -q batch
+
+	# No need to delete rules as they are deleted if set to ""
+}
+
+# _set_conf_list sets conf as uci list
+# conf: array of values eg: [ "value1", "value2" ]
+# path: path of the list eg: dhcp.@dnsmasq[0].server
+_set_conf_list() {
+	conf="$1"
+	uci_path="$2"
+
+	if ! _check_hash "$uci_path" "$conf"; then
+		return 1
+	fi
+
+	_log "Updating $uci_path"
+
+	# Delete the list before adding values
+	uci set "$uci_path="
+
+	echo "$conf" | jq -r '.[]' | while read -r value; do
+		echo uci add_list "$uci_path=$value"
+		uci add_list "$uci_path=$value"
+	done
+}
+
+_find_rule_index() {
+	rule="$1"
+	conf_id="$2"
+
+	found=false
+	i=0
+	id=
+	while true; do
+		uci show "$rule[$i]" > /dev/null 2>&1 || break
+		id="$(uci get "$rule[$i].id" 2>/dev/null || true)"
+		if [ "$id" = "$conf_id" ]; then
+			found=true
+			break
+		fi
+		i=$((i+1))
+	done
+
+	if [ "$found" = false ]; then
+		echo "-1"
+	else
+		echo "$i"
+	fi
+}
+
+# _set_conf_array sets conf in an array TODO: Improve this, seems a bit too hacky
+_set_conf_array() {
+	conf="$1"
+
+	# Is of shape: firewall.@rule
+	uci_path_array="$2"
+
+	# Convert to firewall.rule
+	uci_path="$(echo $uci_path_array | sed 's/\@//g')"
+
+	# Convert to firewall rule
+	uci_cmd="$(echo $uci_path | sed -n -r  's/(^[a-z]*)(\.)/\1 /p')"
+
+	# Check hash
+	if ! _check_hash "$uci_path" "$ret"; then
+		return 1
+	fi
+
+	_log "Updating $uci_path"
+
+	# Set the new rules
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		conf_id="$(echo "$sconf" | jq -r .id )"
+		i="$(_find_rule_index "$uci_path_array" "$conf_id")"
+
+		if [ "$i" -eq "-1" ]; then
+			echo "Rule does not exist, creating"
+
+			# Intentional word splitting
+			uci add $uci_cmd > /dev/null
+		fi
+
+		# Map key to value
+		echo "$sconf" | jq -r --arg index "$i" --arg ucipath "$uci_path_array"  'to_entries | .[] | @text "set \($ucipath)[\($index)].\(.key)=\"\(.value)\""' | uci -q batch
+	done
+
+	# Delete undefined rules
+	i=0
+	while true; do
+		# We finished iterating over all rules
+		uci show "$uci_path_array[$i]" > /dev/null 2>&1 || break
+
+		# If no id is defined, it's should not be there (system rule)
+		id=$(uci get "$uci_path_array[$i].id" 2> /dev/null)
+		if [ -z "$id" ]; then
+			uci delete "$uci_path_array[$i]"
+			continue
+		fi
+
+		# Check if id is still present in remote config
+		if ! echo "$ret" | jq -e -r --arg id "$id" '[.[].id] | index("\($id)")' > /dev/null; then
+			uci delete "$uci_path_array[$i]"
+			continue
+		fi
+
+		i=$((i+1))
+	done
+}
+
 _set_conf_firewall_rules() {
 	conf="$1"
 
@@ -104,77 +229,6 @@ _set_conf_dhcp_staticleases() {
 	}] | del(.[][] | select(. == "null"))')"
 
 	_set_conf_array "$sconf" "dhcp.@host"
-}
-
-# Takes an input as { "key": "value" } and apply it as an uci configuration on uci_path as "set uci_path.key=value"
-_set_conf_single_static() {
-	conf="$1"
-	uci_path="$2"
-	conf_type="$3"
-
-	# Check hash
-	if ! _check_hash "$uci_path" "$ret"; then
-		return 1
-	fi
-
-	# Map key to value
-	uci set "$uci_path=$conf_type"
-	echo "$conf" | jq -r --arg ucipath "$uci_path"  'to_entries | .[] | @text "set \($ucipath).\(.key)=\"\(.value)\""' | uci -q batch
-
-	# No need to delete rules as they are deleted if set to ""
-}
-
-_add_prefix_entries() {
-	entries="$1"
-	prefix="$2"
-
-	echo "$entries" | jq --arg prefix "$prefix" 'to_entries |  map({($prefix + .key): (.value)}) | add'
-}
-
-_apply_remote_conf() {
-	url="$1"
-
-	# Get conf JSON
-	ret="$(_call_acs "$url")" || {
-		echo "Failed to retrieve remote conf"
-		return 1
-	}
-
-	# TODO: Do something better than this
-	if [ "$url" = "dhcp/configs" ]; then
-		_set_conf_dhcp_config "$ret"
-
-	elif [ "$url" = "dns/nameservers" ]; then
-		_set_conf_dns_nameserver "$ret"
-
-	elif [ "$url" = "dhcp/staticleases" ]; then
-		_set_conf_dhcp_staticleases "$ret"
-
-	elif [ "$url" = "firewall/redirects" ]; then
-		_set_conf_firewall_redirects "$ret"
-
-	elif [ "$url" = "firewall/rules" ]; then
-		_set_conf_firewall_rules "$ret"
-
-	elif [ "$url" = "glorytun/tun" ]; then
-		_set_conf_glorytun "$ret"
-
-	elif [ "$url" = "network/interfaces" ]; then
-		_set_conf_network_interface "$ret"
-
-	elif [ "$url" = "network/routes4" ]; then
-		_set_conf_network_routes4 "$ret"
-
-	elif [ "$url" = "network/routes6" ]; then
-		_set_conf_network_routes6 "$ret"
-
-	else
-		echo "Missing conf type"
-	fi
-
-	_check_connect_acs "$uci_path" || return
-
-	uci commit
 }
 
 _set_conf_network_interface() {
@@ -254,120 +308,63 @@ _set_conf_dns_nameserver() {
 	_set_conf_list "$sconf" "dhcp.@dnsmasq[0].server"
 }
 
-_find_rule_index() {
-	rule="$1"
-	conf_id="$2"
+_apply_remote_conf() {
+	url="$1"
 
-	found=false
-	i=0
-	id=
-	while true; do
-		uci show "$rule[$i]" > /dev/null 2>&1 || break
-		id="$(uci get "$rule[$i].id" 2>/dev/null || true)"
-		if [ "$id" = "$conf_id" ]; then
-			found=true
-			break
-		fi
-		i=$((i+1))
-	done
+	# Get conf JSON
+	ret="$(_call_acs "$url")" || {
+		return 1
+	}
 
-	if [ "$found" = false ]; then
-		echo "-1"
+	if [ "$url" = "dhcp/configs" ]; then
+		_set_conf_dhcp_config "$ret"
+
+	elif [ "$url" = "dns/nameservers" ]; then
+		_set_conf_dns_nameserver "$ret"
+
+	elif [ "$url" = "dhcp/staticleases" ]; then
+		_set_conf_dhcp_staticleases "$ret"
+
+	elif [ "$url" = "firewall/redirects" ]; then
+		_set_conf_firewall_redirects "$ret"
+
+	elif [ "$url" = "firewall/rules" ]; then
+		_set_conf_firewall_rules "$ret"
+
+	elif [ "$url" = "glorytun/tun" ]; then
+		_set_conf_glorytun "$ret"
+
+	elif [ "$url" = "network/interfaces" ]; then
+		_set_conf_network_interface "$ret"
+
+	elif [ "$url" = "network/routes4" ]; then
+		_set_conf_network_routes4 "$ret"
+
+	elif [ "$url" = "network/routes6" ]; then
+		_set_conf_network_routes6 "$ret"
+
 	else
-		echo "$i"
-	fi
-}
-
-# _set_conf_list sets conf as uci list
-# conf: array of values eg: [ "value1", "value2" ]
-# path: path of the list eg: dhcp.@dnsmasq[0].server
-_set_conf_list() {
-	conf="$1"
-	uci_path="$2"
-
-	if ! _check_hash "$uci_path" "$conf"; then
-		return 1
+		echo "Missing conf type"
 	fi
 
-	# Delete the list before adding values
-	uci set "$uci_path="
+	_check_connect_acs "$uci_path" || return
 
-	echo "$conf" | jq -r '.[]' | while read -r value; do
-		echo uci add_list "$uci_path=$value"
-		uci add_list "$uci_path=$value"
-	done
+	uci commit
 }
 
-# _set_conf_array sets conf in an array TODO: Improve this, seems a bit too hacky
-_set_conf_array() {
-	conf="$1"
-
-	# Is of shape: firewall.@rule
-	uci_path_array="$2"
-
-	# Convert to firewall.rule
-	uci_path="$(echo $uci_path_array | sed 's/\@//g')"
-
-	# Convert to firewall rule
-	uci_cmd="$(echo $uci_path | sed -n -r  's/(^[a-z]*)(\.)/\1 /p')"
-
-	# Check hash
-	if ! _check_hash "$uci_path" "$ret"; then
-		echo "hash is the same"
-		return 1
-	fi
-
-	# Set the new rules
-	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
-		conf_id="$(echo "$sconf" | jq -r .id )"
-		i="$(_find_rule_index "$uci_path_array" "$conf_id")"
-
-		if [ "$i" -eq "-1" ]; then
-			echo "Rule does not exist, creating"
-
-			# Intentional word splitting
-			uci add $uci_cmd > /dev/null
-		fi
-
-		# Map key to value
-		echo "$sconf" | jq -r --arg index "$i" --arg ucipath "$uci_path_array"  'to_entries | .[] | @text "set \($ucipath)[\($index)].\(.key)=\"\(.value)\""' | uci -q batch
-	done
-
-	# Delete undefined rules
-	i=0
-	while true; do
-		# We finished iterating over all rules
-		uci show "$uci_path_array[$i]" > /dev/null 2>&1 || break
-
-		# If no id is defined, it's should not be there (system rule)
-		id=$(uci get "$uci_path_array[$i].id" 2> /dev/null)
-		if [ -z "$id" ]; then
-			uci delete "$uci_path_array[$i]"
-			continue
-		fi
-
-		# Check if id is still present in remote config
-		if ! echo "$ret" | jq -e -r --arg id "$id" '[.[].id] | index("\($id)")' > /dev/null; then
-			uci delete "$uci_path_array[$i]"
-			continue
-		fi
-
-		i=$((i+1))
-	done
-}
 
 _run() {
 	otb_reload
 	export OTB_DEVICE_ID="a5def614-0f23-4c17-a72b-f8d7704ce070"
 
 	_apply_remote_conf  "firewall/rules"
-	#_apply_remote_conf  "dhcp/staticleases"
-	#_apply_remote_conf  "firewall/redirects"
-	#_apply_remote_conf  "glorytun/tun"
-	#_apply_remote_conf  "network/interfaces"
-	#_apply_remote_conf  "dhcp/configs"
-	#_apply_remote_conf  "dns/nameservers"
-	#_apply_remote_conf  "network/routes6"
+	_apply_remote_conf  "dhcp/staticleases"
+	_apply_remote_conf  "firewall/redirects"
+	_apply_remote_conf  "glorytun/tun"
+	_apply_remote_conf  "network/interfaces"
+	_apply_remote_conf  "dhcp/configs"
+	_apply_remote_conf  "dns/nameservers"
+	_apply_remote_conf  "network/routes6"
 }
 
 RUNNING=1
