@@ -6,20 +6,26 @@ acs_hash_path=/tmp/acs_hash
 
 . /lib/overthebox
 
+_log() {
+	echo "$1" >&2
+}
+
 _call_acs() {
 	curl -s -m 10 --fail "$acs_url/device/$OTB_DEVICE_ID/$1"
 }
 
 _check_connect_acs() {
-	uci_path="$1"
-
 	if [ -z "$(uci changes)" ]; then
 		return 0
 	fi
 
 	if ! curl -s -m 10 --fail "$acs_url/ping" > /dev/null; then
 		echo "New conf is breaking network, reversing"
-		uci revert "$(echo "$uci_path" | cut -d" " -f1)"
+
+		uci changes | grep -o  '[a-zA-Z]*\.' \
+		| sed 's/\.$//' | sort | uniq \
+		| xargs -n 1 uci revert
+
 		return 1
 	fi
 }
