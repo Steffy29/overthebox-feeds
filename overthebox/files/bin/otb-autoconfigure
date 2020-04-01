@@ -47,25 +47,57 @@ _check_hash() {
 	echo "$uci_path;$rhash" >> "$acs_hash_path"
 }
 
-# TODO: Rewrite the json to ensure that we only keep the good fields
 _set_conf_firewall_rules() {
 	conf="$1"
 
-	_set_conf_array "$conf" "firewall.@rule"
+	sconf="$(echo "$conf" | jq -r '[ .[] | {
+		"name":      "\(.name)",
+		"target":    "\(.target)",
+		"src":       "\(.src)",
+		"dest":      "\(.dest)",
+		"dest_ip":   "\(.dest_ip)",
+		"dest_port": "\(.dest_port)",
+		"family":    "\(.family)",
+		"icmp_type": "\(.icmp_type)",
+		"limit":     "\(.limit)",
+		"proto":     "\(.proto)",
+		"src_ip":    "\(.src_ip)",
+		"id":        "\(.id)"
+	}] | del(.[][] | select(. == "null"))')')"
+
+	_set_conf_array "$sconf" "firewall.@rule"
 }
 
-# TODO: Rewrite the json to ensure that we only keep the good fields
 _set_conf_firewall_redirects() {
 	conf="$1"
 
-	_set_conf_array "$conf" "firewall.@redirect"
+	sconf="$(echo "$conf" | jq -r '[ .[] | {
+		"target":    "\(.target)",
+		"src":       "\(.src)",
+		"dest":      "\(.dest)",
+		"enabled":   "\(.enabled)",
+		"src_dport": "\(.src_dport)",
+		"dest_port": "\(.dest_port)",
+		"dest_ip":   "\(.dest_ip)",
+		"proto":     "\(.proto)",
+		"id":        "\(.id)"
+	}] | del(.[][] | select(. == "null"))')"
+
+
+	_set_conf_array "$sconf" "firewall.@redirect"
 }
 
-# TODO: Rewrite the json to ensure that we only keep the good fields
 _set_conf_dhcp_staticleases() {
 	conf="$1"
 
-	_set_conf_array "$conf" "dhcp.@host"
+	sconf="$(echo "$conf" | jq -r '[ .[] | {
+		"name": "\(.name)",
+		"mac":  "\(.mac)",
+		"ip":   "\(.ip)",
+		"id":   "\(.id)"
+	}] | del(.[][] | select(. == "null"))')"
+
+	_set_conf_array "$sconf" "dhcp.@host"
 }
 
 # Takes an input as { "key": "value" } and apply it as an uci configuration on uci_path as "set uci_path.key=value"
@@ -76,7 +108,6 @@ _set_conf_single_static() {
 
 	# Check hash
 	if ! _check_hash "$uci_path" "$ret"; then
-		echo "hash is the same (static)"
 		return 1
 	fi
 
@@ -173,18 +204,21 @@ _set_conf_network_routes6() {
 
 _set_conf_glorytun() {
 	conf="$1"
-	sconf="$(echo $conf | jq -r '{
-		"dev": "\(.dev_name)",
-		"server": "\(.server)",
-		"port": "\(.port)",
-		"key": "\(.key)",
-		"id": "\(.id)",
-		"enable": 1
-	}')"
 
-	dev_name="$(echo $conf | jq -r  '.dev_name')"
+	echo $conf | jq -r -c ".[]" | while read -r sconf; do
+		tconf="$(echo $sconf | jq -r '{
+			"dev":    "\(.dev_name)",
+			"server": "\(.server)",
+			"port":   "\(.port)",
+			"key":    "\(.key)",
+			"id":     "\(.id)",
+			"enable": 1
+		}')"
 
-	_set_conf_single_static "$sconf" "glorytun.$dev_name" "mud"
+		dev_name="$(echo $tconf | jq -r  '.dev_name')"
+
+		_set_conf_single_static "$tconf" "glorytun.$dev_name" "mud"
+	done
 }
 
 _set_conf_dhcp_config() {
@@ -194,11 +228,11 @@ _set_conf_dhcp_config() {
 		ifname="$(echo $sconf | jq -r '.ifname')"
 		tconf="$(echo $sconf | jq -r '{
 			"interface": "\(.ifname)",
-			"start": "\(.start)",
-			"limit": "\(.end)",
+			"start":     "\(.start)",
+			"limit":     "\(.end)",
 			"leasetime": "\(.lease_time)",
-			"force": 1,
-			"ra": 1
+			"force":     1,
+			"ra":        1
 		}')"
 
 		_set_conf_single_static "$tconf" "dhcp.$ifname" "dhcp"
@@ -212,7 +246,6 @@ _set_conf_dns_nameserver() {
 	sconf="$(echo "$conf" | jq -r '[.[].address]')"
 
 	_set_conf_list "$sconf" "dhcp.@dnsmasq[0].server"
-	echo "OK"
 }
 
 _find_rule_index() {
@@ -246,7 +279,6 @@ _set_conf_list() {
 	conf="$1"
 	uci_path="$2"
 
-	echo "$uci_path"
 	if ! _check_hash "$uci_path" "$conf"; then
 		return 1
 	fi
@@ -304,7 +336,7 @@ _set_conf_array() {
 		# If no id is defined, it's should not be there (system rule)
 		id=$(uci get "$uci_path_array[$i].id" 2> /dev/null)
 		if [ -z "$id" ]; then
-			uci delete "$uci_path[$i]"
+			uci delete "$uci_path_array[$i]"
 			continue
 		fi
 
