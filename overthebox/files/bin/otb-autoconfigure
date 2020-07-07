@@ -1,0 +1,499 @@
+#!/bin/sh
+# shellcheck disable=SC1090,SC1091,SC1066,SC1087,SC2086,SC2016,SC2039
+# vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4:
+ACS_URL=192.168.100.10:8080
+ACS_PATH_PATH=/tmp/acs_hash
+
+. /lib/overthebox
+. /lib/functions/network.sh
+
+_call_acs() {
+	curl -s -m 10 --fail -L "$ACS_URL/device/$OTB_DEVICE_ID/$1?version=$2"
+}
+
+_check_connect_acs() {
+	if [ -z "$(uci changes)" ]; then
+		logger "No changes, no need to check"
+		return 0
+	fi
+
+	local ret
+	logger "Checking connectivity"
+	if ! curl -s -m 10 --fail -L "$ACS_URL/ping" > /dev/null; then
+		logger "New conf is breaking network, reversing"
+
+		uci changes | grep -o  '[a-zA-Z]*\.' \
+		| sed 's/\.$//' | sort | uniq \
+		| xargs -n 1 uci revert
+
+		return 1
+	fi
+}
+
+_check_hash() {
+	local uci_path="$1"
+	local conf="$2"
+
+	escaped_path="$(printf "%s" "$uci_path" | sed 's/[.[\*^$()+?{|]/\\&/g')"
+
+	touch "$ACS_PATH_PATH"
+
+	rhash="$(echo "$conf" | md5sum | cut -d" " -f1)"
+	lhash="$(grep "$escaped_path" "$ACS_PATH_PATH" | cut -d";" -f2)"
+
+	if [ "$rhash" = "$lhash" ]; then
+		return 1
+	fi
+
+	# Remove the hash if exists
+	tmp_file="$(mktemp)"
+	awk "!/$escaped_path/{print}" "$ACS_PATH_PATH" > "$tmp_file"
+	mv "$tmp_file" "$ACS_PATH_PATH"
+
+	echo "$uci_path;$rhash" >> "$ACS_PATH_PATH"
+}
+
+# Takes an input as { "key": "value" } and apply it as an uci configuration on uci_path as "set uci_path.key=value"
+_set_conf_single_static() {
+	local conf="$1"
+	local uci_path="$2"
+	local conf_type="$3"
+
+	# Remove empty values
+	conf="$(echo $conf | jq 'del(.[] | select(. == "null"))')"
+
+	# Check hash
+	if ! _check_hash "$uci_path" "$ret"; then
+		return 1
+	fi
+
+	logger "Updating $uci_path"
+
+	# Map key to value
+	uci set "$uci_path="
+	uci set "$uci_path=$conf_type"
+	echo "$conf" | jq -r --arg ucipath "$uci_path"  'to_entries | .[] | @text "set \($ucipath).\(.key)=\"\(.value)\""' | uci -q batch
+
+	# No need to delete rules as they are deleted if set to ""
+}
+
+# _set_conf_list sets conf as uci list
+# conf: array of values eg: [ "value1", "value2" ]
+# path: path of the list eg: dhcp.@dnsmasq[0].server
+_set_conf_list() {
+	local conf="$1"
+	local uci_path="$2"
+
+	if ! _check_hash "$uci_path" "$conf"; then
+		return 1
+	fi
+
+	logger "Updating $uci_path"
+
+	# Delete the list before adding values
+	uci set "$uci_path="
+
+	echo "$conf" | jq -r '.[]' | while read -r value; do
+		echo uci add_list "$uci_path=$value"
+		uci add_list "$uci_path=$value"
+	done
+}
+
+_find_rule_index() {
+	local rule="$1"
+	local conf_id="$2"
+
+	found=false
+	i=0
+	id=
+	while true; do
+		uci show "$rule[$i]" > /dev/null 2>&1 || break
+		id="$(uci get "$rule[$i].id" 2>/dev/null || true)"
+		if [ "$id" = "$conf_id" ]; then
+			found=true
+			break
+		fi
+		i=$((i+1))
+	done
+
+	if [ "$found" = false ]; then
+		echo "-1"
+	else
+		echo "$i"
+	fi
+}
+
+# $1 is of format 192.168.2.5
+# $2 is of format 192.168.2.0
+_ip_belong_to_network() {
+	awk  -v ipaddr=$1 -v network=$2 '
+	function ip2int(ip) {
+        for (ret=0,n=split(ip,a,"\."),x=1;x<=n;x++) ret=or(lshift(ret,8),a[x])
+        return ret
+	}
+
+	BEGIN{
+			iip=ip2int(ipaddr)
+			inet=ip2int(network)
+			if (and(iip,inet) == inet){ exit 0 }
+			else { exit 1 }
+	}'
+
+	return $?
+}
+
+# Get the interface associated with this ip
+_get_interface_ip() {
+	ip=$1
+
+	uci show network | sed -n -E 's/network\.(\S*?)=interface/\1/p' |\
+	while read -r iface; do
+		# Get all ip of the interface
+		ubus call network.interface dump  |\
+		jq -r --arg iface "$iface"  '.interface[] | select(.interface == $iface) | .["ipv4-address"][]  | @text "\(.address)/\(.mask)"' 2>/dev/null | while read -r iface_subnet; do
+
+			# Takes 192.168.2.5/24 as input and returns 192.168.2.0 as NETWORK
+			eval "$(ipcalc.sh "$iface_subnet")"
+			if _ip_belong_to_network "$ip" "$NETWORK"; then
+				echo "$iface"
+				return
+			fi
+		done
+	done
+}
+
+# _set_conf_array sets conf in an array TODO: Improve this, seems a bit too hacky
+_set_conf_array() {
+	local conf="$1"
+
+	# Is of shape: firewall.@rule
+	uci_path_array="$2"
+
+	# Convert to firewall.rule
+	uci_path="$(echo $uci_path_array | sed 's/\@//g')"
+
+	# Convert to firewall rule
+	uci_cmd="$(echo $uci_path | sed -n -r  's/(^[a-z]*)(\.)/\1 /p')"
+
+	# Check hash
+	if ! _check_hash "$uci_path" "$ret"; then
+		return 1
+	fi
+
+	logger "Updating $uci_path"
+
+	# Set the new rules
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		conf_id="$(echo "$sconf" | jq -r .id )"
+		i="$(_find_rule_index "$uci_path_array" "$conf_id")"
+
+		if [ "$i" -eq "-1" ]; then
+			echo "Rule does not exist, creating"
+
+			# Intentional word splitting
+			uci add $uci_cmd > /dev/null
+		fi
+
+		# Map key to value
+		echo "$sconf" | jq -r --arg index "$i" --arg ucipath "$uci_path_array"  'to_entries | .[] | @text "set \($ucipath)[\($index)].\(.key)=\"\(.value)\""' | uci -q batch
+	done
+
+	# Delete undefined rules
+	i=0
+	while true; do
+		# We finished iterating over all rules
+		uci show "$uci_path_array[$i]" > /dev/null 2>&1 || break
+
+		# If no id is defined, it's should not be there (system rule)
+		id=$(uci get "$uci_path_array[$i].id" 2> /dev/null)
+		if [ -z "$id" ]; then
+			uci delete "$uci_path_array[$i]"
+			continue
+		fi
+
+		# Check if id is still present in remote config
+		if ! echo "$ret" | jq -e -r --arg id "$id" '[.[].id] | index("\($id)")' > /dev/null; then
+			uci delete "$uci_path_array[$i]"
+			continue
+		fi
+
+		i=$((i+1))
+	done
+}
+
+_set_conf_firewall_rules() {
+	conf="$1"
+
+	# TODO: Add automatic target
+	sconf="$(echo "$conf" | jq -r '[ .[] | {
+		"name":      "\(.name)",
+		"target":    "\(.target)",
+		"src":       "\(.srcZone)",
+		"dest":      "\(.destZone)",
+		"dest_ip":   "\(.destIP)",
+		"dest_port": "\(.destPort)",
+		"family":    "\(.family)",
+		"icmp_type": "\(.icmpType)",
+		"limit":     "\(.limit)",
+		"proto":     "\(.proto)",
+		"src_ip":    "\(.srcIP)",
+		"id":        "\(.id)"
+	}] | del(.[][] | select(. == "null"))')"
+
+	_set_conf_array "$sconf" "firewall.@rule"
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/firewall reload
+	fi
+}
+
+_set_conf_firewall_redirects() {
+	conf="$1"
+
+	sconf="$(echo "$conf" | jq -r '[ .[] | {
+		"target":    "\(.target)",
+		"src":       "\(.srcZone)",
+		"dest":      "\(.destZone)",
+		"enabled":   1,
+		"src_dport": "\(.srcDPort)",
+		"dest_port": "\(.destPort)",
+		"dest_ip":   "\(.destIP)",
+		"proto":     "\(.proto)",
+		"id":        "\(.id)"
+	}] | del(.[][] | select(. == "null"))')"
+
+
+	_set_conf_array "$sconf" "firewall.@redirect"
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/firewall reload
+	fi
+}
+
+_set_conf_dhcp_staticleases() {
+	conf="$1"
+
+	sconf="$(echo "$conf" | jq -r '[ .[] | {
+		"name":     "\(.hostname)",
+		"mac":      "\(.mac)",
+		"ip":       "\(.ip)",
+		"id":       "\(.id)"
+	}] | del(.[][] | select(. == "null"))')"
+
+	echo "setting conf to $sconf"
+
+	_set_conf_array "$sconf" "dhcp.@host"
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/dnsmasq restart
+	fi
+}
+
+_set_conf_network_interface() {
+	local conf="$1"
+
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		interface="$(echo "$sconf" | jq -r ".interfaceName")"
+		sconf="$(echo "$sconf" | jq -r '{
+			"ifname":   "\(.ifname)",
+			"ipaddr":   "\(.ipAddr)",
+			"netmask":  "\(.netmask)",
+			"gateway":  "\(.gateway)",
+			"mtu":      "\(.mtu)",
+			"ip4table": "\(.ip4table)",
+			"ip6table": "\(.ip6table)",
+			"ipv6":     "\(.ipv6)",
+			"source":   "\(.source)",
+			"type":     "\(.type)",
+		}')"
+
+		_set_conf_single_static "$sconf" "network.$interface" "interface"
+	done
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/network reload
+	fi
+}
+
+_set_conf_network_routes6() {
+	local conf="$1"
+
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		name="$(echo "$sconf" | jq -r ".name")"
+		sconf="$(echo "$sconf" | jq -r '{
+			"interface": "\(.interface)",
+			"target":    "\(.target)",
+			"netmask":   "\(.netmask)",
+			"gateway":   "\(.gateway)",
+			"metric":    "\(.metric)",
+			"mtu":       "\(.mtu)",
+			"table":     "\(.table)",
+			"source":    "\(.source)",
+			"onlink":    "\(.onlink)",
+			"type":      "\(.type)",
+		}')"
+
+		_set_conf_single_static	"$sconf" "network.$name" "route6"
+	done
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/network reload
+	fi
+}
+
+_set_conf_network_routes4() {
+	local conf="$1"
+
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		name="$(echo "$sconf" | jq -r ".name")"
+
+		# Check if the interface is defined, otherwise get the inferace
+		interface=$(echo $sconf | jq -r '.interface')
+		if [ "$interface" = "null" ]; then
+			target="$(echo $sconf | jq -r ".gateway")"
+			interface=$(_get_interface_ip "$target")
+		fi
+
+		sconf="$(echo "$sconf" | jq -r --arg interface $interface '{
+			"interface": $interface,
+			"target":    "\(.target)",
+			"netmask":   "\(.netmask)",
+			"gateway":   "\(.gateway)",
+			"metric":    "\(.metric)",
+			"mtu":       "\(.mtu)",
+			"table":     "\(.table)",
+			"source":    "\(.source)",
+			"onlink":    "\(.onlink)",
+			"type":      "\(.type)",
+		}')"
+
+		_set_conf_single_static	"$sconf" "network.$name" "route"
+	done
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/network reload
+	fi
+}
+
+_set_conf_glorytun() {
+	local conf="$1"
+
+	echo $conf | jq -r -c ".[]" | while read -r sconf; do
+		tconf="$(echo $sconf | jq -r '{
+			"dev":    "\(.dev_name)",
+			"server": "\(.server)",
+			"port":   "\(.port)",
+			"key":    "\(.key)",
+			"id":     "\(.id)",
+			"enable": 1
+		}')"
+
+		dev_name="$(echo $tconf | jq -r  '.dev_name')"
+
+		_set_conf_single_static "$tconf" "glorytun.$dev_name" "mud"
+	done
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/glorytun reload
+	fi
+}
+
+_set_conf_dhcp_config() {
+	local conf="$1"
+
+	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
+		interface="$(echo $sconf | jq -r '.interface')"
+		tconf="$(echo $sconf | jq -r '{
+			"start":     "\(.offset)",
+			"limit":     "\(.poolSize)",
+			"leasetime": "\(.leaseDuration)",
+		}')"
+
+	_set_conf_single_static "$tconf" "dhcp.$interface" "dhcp"
+	done
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/dnsmasq restart
+	fi
+}
+
+_set_conf_dns_nameserver() {
+	local conf="$1"
+
+	sconf="$(echo "$conf" | jq -r '[.[].server]')"
+
+	echo "setting conf list to sconf"
+
+	_set_conf_list "$sconf" "dhcp.@dnsmasq[0].server"
+
+	if [ -n "$(uci changes)" ]; then
+		/etc/init.d/dnsmasq restart
+	fi
+}
+
+_apply_remote_conf() {
+	version="$1"
+	url="$2"
+
+	# Get conf JSON
+	ret="$(_call_acs "$url" "$version")" || {
+		logger "cannot reach $url"
+		return 1
+	}
+
+	if [ "$url" = "dhcp/configs" ]; then
+		_set_conf_dhcp_config "$ret"
+
+	elif [ "$url" = "dhcp/staticleases" ]; then
+		_set_conf_dhcp_staticleases "$ret"
+
+	elif [ "$url" = "dns/nameservers" ]; then
+		_set_conf_dns_nameserver "$ret"
+
+	elif [ "$url" = "firewall/redirects" ]; then
+		_set_conf_firewall_redirects "$ret"
+
+	elif [ "$url" = "firewall/rules" ]; then
+		_set_conf_firewall_rules "$ret"
+
+	elif [ "$url" = "glorytun/tun" ]; then
+		_set_conf_glorytun "$ret"
+
+	elif [ "$url" = "network/interfaces" ]; then
+		_set_conf_network_interface "$ret"
+
+	elif [ "$url" = "network/routes4" ]; then
+		_set_conf_network_routes4 "$ret"
+
+	elif [ "$url" = "network/routes6" ]; then
+		_set_conf_network_routes6 "$ret"
+
+	else
+		echo "Missing conf type"
+	fi
+
+	_check_connect_acs "$uci_path" || return
+
+	uci commit
+}
+
+_run() {
+	otb_reload
+
+	if [ -z "$OTB_DEVICE_ID" ]; then
+		return
+	fi
+
+
+	_apply_remote_conf  "1" "dhcp/configs"
+	_apply_remote_conf  "1" "dhcp/staticleases"
+	_apply_remote_conf  "1" "dns/nameservers"
+	_apply_remote_conf  "1" "firewall/redirects"
+	_apply_remote_conf  "1" "firewall/rules"
+	_apply_remote_conf  "1" "glorytun/tun"
+	_apply_remote_conf  "1" "network/interfaces"
+	_apply_remote_conf  "1" "network/routes4"
+	_apply_remote_conf  "1" "network/routes6"
+}
+
+_run
