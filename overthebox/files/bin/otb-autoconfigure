@@ -8,7 +8,9 @@ ACS_PATH_PATH=/tmp/acs_hash
 . /lib/functions/network.sh
 
 _call_acs() {
-	curl -s -m 10 --fail -L "$ACS_URL/device/$OTB_DEVICE_ID/$1?version=$2"
+	curl -s -m 10 --fail \
+	-H "X-Auth-OVH: $OTB_TOKEN" \
+	-L "$ACS_URL/device/$OTB_DEVICE_ID/$1?version=$2"
 }
 
 _check_connect_acs() {
