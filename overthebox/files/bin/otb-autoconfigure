@@ -287,8 +287,6 @@ _set_conf_firewall_rules() {
 		"dest_ip":   "\(.destIP)",
 		"dest_port": "\(.destPort)",
 		"family":    "\(.family)",
-		"icmp_type": "\(.icmpType)",
-		"limit":     "\(.limit)",
 		"proto":     "\(.proto)",
 		"src_ip":    "\(.srcIP)",
 		"id":        "\(.id)"
@@ -305,15 +303,22 @@ _set_conf_firewall_redirects() {
 	conf="$1"
 
 	sconf="$(echo "$conf" | jq -r '[ .[] | {
-		"target":    "\(.target)",
+		"name":      "\(.name)",
+
 		"src":       "\(.srcZone)",
-		"dest":      "\(.destZone)",
-		"enabled":   1,
+		"src_ip":    "\(.srcIP)",
+		"src_dip":   "\(.srcDIP)",
+		"src_port":  "\(.srcPort)",
 		"src_dport": "\(.srcDPort)",
-		"dest_port": "\(.destPort)",
+
+		"dest":      "\(.destZone)",
 		"dest_ip":   "\(.destIP)",
+		"dest_port": "\(.destPort)",
+
+		"enabled":   1,
+		"id":        "\(.id)",
 		"proto":     "\(.proto)",
-		"id":        "\(.id)"
+		"target":    "\(.target)",
 	}] | del(.[][] | select(. == "null"))')"
 
 
@@ -388,13 +393,10 @@ _set_conf_network_routes6() {
 		sconf="$(echo "$sconf" | jq -r '{
 			"interface": "\(.interface)",
 			"target":    "\(.target)",
-			"netmask":   "\(.netmask)",
 			"gateway":   "\(.gateway)",
 			"metric":    "\(.metric)",
 			"mtu":       "\(.mtu)",
 			"table":     "\(.table)",
-			"source":    "\(.source)",
-			"onlink":    "\(.onlink)",
 			"type":      "\(.type)",
 		}')"
 
@@ -427,8 +429,6 @@ _set_conf_network_routes4() {
 			"metric":    "\(.metric)",
 			"mtu":       "\(.mtu)",
 			"table":     "\(.table)",
-			"source":    "\(.source)",
-			"onlink":    "\(.onlink)",
 			"type":      "\(.type)",
 		}')"
 
