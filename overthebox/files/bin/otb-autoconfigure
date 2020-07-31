@@ -98,6 +98,35 @@ _get_generated_conf() {
 	done
 }
 
+_set_conf_static() {
+	local type="$1"
+	local subtype="$2"
+	local json_arr="$3"
+	local reload_command="$4"
+	local name_key="$5"
+	local jq_filter="$6"
+
+	confs="$(echo "$json_arr" | jq -r -c ".[]")"
+	if [ -n "$confs" ]; then
+		while read -r sconf; do
+			name="$(echo "$sconf" | jq -r ".$name_key")"
+			sconf="$(echo "$sconf" | jq -r "$jq_filter")"
+
+			_set_conf_single_static	"$sconf" "$type.$name" "$subtype"
+
+			new_confs="$(echo -e "$new_confs\n$type.$name")"
+		done <<-EOT
+			${confs}
+		EOT
+	fi
+
+	_delete_old_confs "$new_confs" "$(_get_generated_conf "$type" "$subtype")"
+
+	if [ -n "$(uci changes)" ]; then
+		eval "$reload_command"
+	fi
+}
+
 # Takes an input as { "key": "value" } and apply it as an uci configuration on uci_path as "set uci_path.key=value"
 _set_conf_single_static() {
 	local conf="$1"
@@ -350,10 +379,10 @@ _set_conf_dhcp_staticleases() {
 
 _set_conf_network_interface() {
 	local conf="$1"
+	local new_confs=
 
 	confs="$(echo "$conf" | jq -r -c ".[]")"
 	if [ -n "$confs" ]; then
-		new_confs=
 		while read -r sconf; do
 			interface="$(echo "$sconf" | jq -r ".interfaceName")"
 			sconf="$(echo "$sconf" | jq -r '{
@@ -414,7 +443,7 @@ _set_conf_network_routes4() {
 	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
 		name="$(echo "$sconf" | jq -r ".name")"
 
-		# Check if the interface is defined, otherwise get the inferace
+		# Check if the interface is defined, otherwise get the inferface
 		interface=$(echo $sconf | jq -r '.interface')
 		if [ "$interface" = "null" ]; then
 			target="$(echo $sconf | jq -r ".gateway")"
@@ -530,7 +559,18 @@ _apply_remote_conf() {
 		_set_conf_network_routes4 "$ret"
 
 	elif [ "$url" = "network/routes6" ]; then
-		_set_conf_network_routes6 "$ret"
+		_set_conf_static \
+			"network" "routes6" \
+			"$ret" "/etc/init.d/network reload" \
+			"name" '{
+				"interface": "\(.interface)",
+				"target":    "\(.target)",
+				"gateway":   "\(.gateway)",
+				"metric":    "\(.metric)",
+				"mtu":       "\(.mtu)",
+				"table":     "\(.table)",
+				"type":      "\(.type)",
+			}'
 
 	else
 		echo "Missing conf type"
