@@ -37,6 +37,11 @@ _delete_old_confs() {
 	local new_confs="$1"
 	local local_confs="$2"
 
+	# If there is no local_confs, there is nothing to delete
+	if [ -z "$local_confs" ]; then
+		return
+	fi
+
 	# If a conf is in local_confs and not in new_confs, delete it
 	to_delete="$(printf "%s\n%s" "$new_confs" "$local_confs" |\
 	awk '
@@ -57,7 +62,7 @@ _delete_old_confs() {
 	fi
 
 	logger "Deleting conf for $to_delete"
-	echo "$to_delete" | xargs uci delete
+	echo "$to_delete" | xargs -n 1 uci delete
 }
 
 # Checks if a conf has already been applied. This prevents from applying multiple
@@ -106,6 +111,8 @@ _set_conf_static() {
 	local name_key="$5"
 	local jq_filter="$6"
 
+	local new_confs=
+
 	confs="$(echo "$json_arr" | jq -r -c ".[]")"
 	if [ -n "$confs" ]; then
 		while read -r sconf; do
@@ -114,7 +121,7 @@ _set_conf_static() {
 
 			_set_conf_single_static	"$sconf" "$type.$name" "$subtype"
 
-			new_confs="$(echo -e "$new_confs\n$type.$name")"
+			new_confs="$(echo -e "$type.$name\n$new_confs")"
 		done <<-EOT
 			${confs}
 		EOT
