@@ -457,7 +457,6 @@ _set_conf_network_routes4(){
 		EOT
 	fi
 
-	echo "new conf is $new_confs"
 	_set_conf_static "network" "route" "$new_confs" \
 	"/etc/init.d/network reload" "name" '{
 		"interface": "\(.interface)",
@@ -470,29 +469,6 @@ _set_conf_network_routes4(){
 		"table":     "\(.table)",
 		"type":      "\(.type)",
 	}'
-}
-
-_set_conf_glorytun() {
-	local conf="$1"
-
-	echo $conf | jq -r -c ".[]" | while read -r sconf; do
-		tconf="$(echo $sconf | jq -r '{
-			"dev":    "\(.dev_name)",
-			"server": "\(.server)",
-			"port":   "\(.port)",
-			"key":    "\(.key)",
-			"id":     "\(.id)",
-			"enable": 1
-		}')"
-
-		dev_name="$(echo $tconf | jq -r  '.dev_name')"
-
-		_set_conf_single_static "$tconf" "glorytun.$dev_name" "mud"
-	done
-
-	if [ -n "$(uci changes)" ]; then
-		/etc/init.d/glorytun reload
-	fi
 }
 
 _set_conf_dns_nameserver() {
@@ -539,9 +515,6 @@ _apply_remote_conf() {
 
 	elif [ "$url" = "firewall/rules" ]; then
 		_set_conf_firewall_rules "$ret"
-
-	elif [ "$url" = "glorytun/tun" ]; then
-		_set_conf_glorytun "$ret"
 
 	elif [ "$url" = "network/interfaces" ]; then
 		_set_conf_network_interface "$ret"
