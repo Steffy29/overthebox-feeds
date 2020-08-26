@@ -179,7 +179,6 @@ _set_conf_list() {
 	uci set "$uci_path="
 
 	echo "$conf" | jq -r '.[]' | while read -r value; do
-		echo uci add_list "$uci_path=$value"
 		uci add_list "$uci_path=$value"
 	done
 }
@@ -357,7 +356,6 @@ _set_conf_firewall_redirects() {
 		"target":    "\(.target)",
 	}] | del(.[][] | select(. == "null"))')"
 
-
 	_set_conf_array "$sconf" "firewall.@redirect"
 
 	if [ -n "$(uci changes)" ]; then
@@ -375,49 +373,10 @@ _set_conf_dhcp_staticleases() {
 		"id":       "\(.id)"
 	}] | del(.[][] | select(. == "null"))')"
 
-	echo "setting conf to $sconf"
-
 	_set_conf_array "$sconf" "dhcp.@host"
 
 	if [ -n "$(uci changes)" ]; then
 		/etc/init.d/dnsmasq restart
-	fi
-}
-
-_set_conf_network_interface() {
-	local conf="$1"
-	local new_confs=
-
-	confs="$(echo "$conf" | jq -r -c ".[]")"
-	if [ -n "$confs" ]; then
-		while read -r sconf; do
-			interface="$(echo "$sconf" | jq -r ".interfaceName")"
-			sconf="$(echo "$sconf" | jq -r '{
-				"ifname":   "\(.ifname)",
-				"ipaddr":   "\(.ipAddr)",
-				"netmask":  "\(.netmask)",
-				"gateway":  "\(.gateway)",
-				"mtu":      "\(.mtu)",
-				"ip4table": "\(.ip4table)",
-				"ip6table": "\(.ip6table)",
-				"proto":	"\(.proto)",
-				"ipv6":     "\(.ipv6)",
-				"source":   "\(.source)",
-				"type":     "\(.type)"
-			}')"
-
-			_set_conf_single_static "$sconf" "network.$interface" "interface"
-
-			new_confs="$(echo -e "$new_confs\nnetwork.$interface")"
-		done <<-EOT
-			${confs}
-		EOT
-	fi
-
-	_delete_old_confs "$new_confs" "$(_get_generated_conf "network" "interface")"
-
-	if [ -n "$(uci changes)" ]; then
-		/etc/init.d/network reload
 	fi
 }
 
@@ -517,7 +476,21 @@ _apply_remote_conf() {
 		_set_conf_firewall_rules "$ret"
 
 	elif [ "$url" = "network/interfaces" ]; then
-		_set_conf_network_interface "$ret"
+		_set_conf_static "network" "interface" "$ret" \
+		"/etc/init.d/network reload" "interfaceName" \
+		'{
+				"ifname":   "\(.ifname)",
+				"ipaddr":   "\(.ipAddr)",
+				"netmask":  "\(.netmask)",
+				"gateway":  "\(.gateway)",
+				"mtu":      "\(.mtu)",
+				"ip4table": "\(.ip4table)",
+				"ip6table": "\(.ip6table)",
+				"proto":	"\(.proto)",
+				"ipv6":     "\(.ipv6)",
+				"source":   "\(.source)",
+				"type":     "\(.type)"
+		}'
 
 	elif [ "$url" = "network/routes4" ]; then
 		_set_conf_network_routes4 "$ret"
