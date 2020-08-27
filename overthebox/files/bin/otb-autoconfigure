@@ -162,14 +162,17 @@ _set_conf_single_static() {
 # path: path of the list eg: dhcp.@dnsmasq[0].server
 _set_conf_list() {
 	local conf="$1"
-	local uci_path="$2"
+	local key="$2"
+	local uci_path="$3"
+	local reload_command="$4"
 
-	if ! _check_hash "$uci_path" "$conf"; then
+	conf="$(echo "$conf" | jq -r "[.[].$key]")"
+
+	if [ -z "$conf" ]; then
 		return 1
 	fi
 
-	# TODO: Should I keep this ?
-	if [ -z "$conf" ]; then
+	if ! _check_hash "$uci_path" "$conf"; then
 		return 1
 	fi
 
@@ -181,6 +184,10 @@ _set_conf_list() {
 	echo "$conf" | jq -r '.[]' | while read -r value; do
 		uci add_list "$uci_path=$value"
 	done
+
+	if [ -n "$(uci changes)" ]; then
+		eval "$reload_command"
+	fi
 }
 
 # Finds the rule's index in uci that has the id "conf_id"
@@ -393,17 +400,6 @@ _set_conf_network_routes4(){
 	}'
 }
 
-_set_conf_dns_nameserver() {
-	local conf="$1"
-	sconf="$(echo "$conf" | jq -r '[.[].server]')"
-
-	_set_conf_list "$sconf" "dhcp.@dnsmasq[0].server"
-
-	if [ -n "$(uci changes)" ]; then
-		/etc/init.d/dnsmasq restart
-	fi
-}
-
 _apply_remote_conf() {
 	version="$1"
 	url="$2"
@@ -435,7 +431,8 @@ _apply_remote_conf() {
 		}' "/etc/init.d/dnsmasq restart"
 
 	elif [ "$url" = "dns/nameservers" ]; then
-		_set_conf_dns_nameserver "$ret"
+		_set_conf_list "$ret" "server" "dhcp.@dnsmasq[0].server" \
+			"/etc/init.d/dnsmasq restart"
 
 	elif [ "$url" = "firewall/redirects" ]; then
 		_set_conf_array "$ret" "firewall.@redirect" '{
@@ -457,6 +454,7 @@ _apply_remote_conf() {
 			"target":    "\(.target)",
 		}' "/etc/init.d/firewall reload"
 
+	# Special function used to find the network automaticaly
 	elif [ "$url" = "firewall/rules" ]; then
 		_set_conf_firewall_rules "$ret"
 
@@ -477,6 +475,7 @@ _apply_remote_conf() {
 				"type":     "\(.type)"
 		}'
 
+	# Special function used to find the network automaticaly
 	elif [ "$url" = "network/routes4" ]; then
 		_set_conf_network_routes4 "$ret"
 
