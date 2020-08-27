@@ -194,7 +194,6 @@ _find_rule_index() {
 	while true; do
 		uci show "$rule[$i]" > /dev/null 2>&1 || break
 
-		# TODO: Why did I put || true ?
 		id="$(uci get "$rule[$i].id" 2>/dev/null || true)"
 		if [ "$id" = "$conf_id" ]; then
 			found=true
@@ -257,6 +256,12 @@ _set_conf_array() {
 
 	# Is of shape: firewall.@rule
 	uci_path_array="$2"
+	jq_filter="$3"
+	reload_command="$4"
+
+	# Filter null values
+	jq_filter="[ .[] | $jq_filter ] | del(.[][] | select(. == \"null\"))"
+	conf="$(echo "$conf" | jq -r "$jq_filter")"
 
 	# Convert to firewall.rule
 	uci_path="$(echo $uci_path_array | sed 's/\@//g')"
@@ -265,13 +270,13 @@ _set_conf_array() {
 	uci_cmd="$(echo $uci_path | sed -n -r 's/(^[a-z]*)(\.)/\1 /p')"
 
 	# Check hash
-	if ! _check_hash "$uci_path" "$ret"; then
+	if ! _check_hash "$uci_path" "$conf"; then
 		return 1
 	fi
 
 	logger "Updating $uci_path"
 
-	# Set the new rules
+	# Iterate the array of rules one by one
 	echo "$conf" | jq -r -c ".[]" | while read -r sconf; do
 		conf_id="$(echo "$sconf" | jq -r .id )"
 		i="$(_find_rule_index "$uci_path_array" "$conf_id")"
@@ -308,6 +313,10 @@ _set_conf_array() {
 
 		i=$((i+1))
 	done
+
+	if [ -n "$(uci changes)" ]; then
+		eval "$reload_command"
+	fi
 }
 
 _set_conf_firewall_rules() {
@@ -331,52 +340,6 @@ _set_conf_firewall_rules() {
 
 	if [ -n "$(uci changes)" ]; then
 		/etc/init.d/firewall reload
-	fi
-}
-
-_set_conf_firewall_redirects() {
-	conf="$1"
-
-	sconf="$(echo "$conf" | jq -r '[ .[] | {
-		"name":      "\(.name)",
-
-		"src":       "\(.srcZone)",
-		"src_ip":    "\(.srcIP)",
-		"src_dip":   "\(.srcDIP)",
-		"src_port":  "\(.srcPort)",
-		"src_dport": "\(.srcDPort)",
-
-		"dest":      "\(.destZone)",
-		"dest_ip":   "\(.destIP)",
-		"dest_port": "\(.destPort)",
-
-		"enabled":   1,
-		"id":        "\(.id)",
-		"proto":     "\(.proto)",
-		"target":    "\(.target)",
-	}] | del(.[][] | select(. == "null"))')"
-
-	_set_conf_array "$sconf" "firewall.@redirect"
-
-	if [ -n "$(uci changes)" ]; then
-		/etc/init.d/firewall reload
-	fi
-}
-
-_set_conf_dhcp_staticleases() {
-	conf="$1"
-
-	sconf="$(echo "$conf" | jq -r '[ .[] | {
-		"name":     "\(.hostname)",
-		"mac":      "\(.mac)",
-		"ip":       "\(.ip)",
-		"id":       "\(.id)"
-	}] | del(.[][] | select(. == "null"))')"
-
-	_set_conf_array "$sconf" "dhcp.@host"
-
-	if [ -n "$(uci changes)" ]; then
-		/etc/init.d/dnsmasq restart
 	fi
 }
 
@@ -464,13 +427,35 @@ _apply_remote_conf() {
 			}'
 
 	elif [ "$url" = "dhcp/staticleases" ]; then
-		_set_conf_dhcp_staticleases "$ret"
+		_set_conf_array "$ret" "dhcp.@host" '{
+			"name":     "\(.hostname)",
+			"mac":      "\(.mac)",
+			"ip":       "\(.ip)",
+			"id":       "\(.id)"
+		}' "/etc/init.d/dnsmasq restart"
 
 	elif [ "$url" = "dns/nameservers" ]; then
 		_set_conf_dns_nameserver "$ret"
 
 	elif [ "$url" = "firewall/redirects" ]; then
-		_set_conf_firewall_redirects "$ret"
+		_set_conf_array "$ret" "firewall.@redirect" '{
+			"name":      "\(.name)",
+
+			"src":       "\(.srcZone)",
+			"src_ip":    "\(.srcIP)",
+			"src_dip":   "\(.srcDIP)",
+			"src_port":  "\(.srcPort)",
+			"src_dport": "\(.srcDPort)",
+
+			"dest":      "\(.destZone)",
+			"dest_ip":   "\(.destIP)",
+			"dest_port": "\(.destPort)",
+
+			"enabled":   1,
+			"id":        "\(.id)",
+			"proto":     "\(.proto)",
+			"target":    "\(.target)",
+		}' "/etc/init.d/firewall reload"
 
 	elif [ "$url" = "firewall/rules" ]; then
 		_set_conf_firewall_rules "$ret"
