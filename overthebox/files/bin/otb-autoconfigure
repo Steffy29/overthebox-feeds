@@ -110,6 +110,7 @@ _set_conf_static() {
 	local reload_command="$4"
 	local name_key="$5"
 	local jq_filter="$6"
+	local call_path="$7"
 
 	local new_confs=
 
@@ -119,7 +120,7 @@ _set_conf_static() {
 			name="$(echo "$sconf" | jq -r ".$name_key")"
 			sconf="$(echo "$sconf" | jq -r "$jq_filter")"
 
-			_set_conf_single_static	"$sconf" "$type.$name" "$subtype"
+			_set_conf_single_static	"$sconf" "$type.$name" "$subtype" "$call_path"
 
 			new_confs="$(echo -e "$type.$name\n$new_confs")"
 		done <<-EOT
@@ -139,12 +140,13 @@ _set_conf_single_static() {
 	local conf="$1"
 	local uci_path="$2"
 	local conf_type="$3"
+	local call_path="$5"
 
 	# Remove empty values and add "generatedby"
 	conf="$(echo $conf | jq 'del(.[] | select(. == "null")) | . + {"generatedby": "autoconfigure"}')"
 
 	# Check hash
-	if ! _check_hash "$uci_path" "$ret"; then
+	if ! _check_hash "$call_path" "$conf"; then
 		logger "Hashes are the same"
 		return 1
 	fi
@@ -165,6 +167,7 @@ _set_conf_list() {
 	local key="$2"
 	local uci_path="$3"
 	local reload_command="$4"
+	local call_path="$5"
 
 	conf="$(echo "$conf" | jq -r "[.[].$key]")"
 
@@ -172,7 +175,7 @@ _set_conf_list() {
 		return 1
 	fi
 
-	if ! _check_hash "$uci_path" "$conf"; then
+	if ! _check_hash "$call_path" "$conf"; then
 		return 1
 	fi
 
@@ -265,6 +268,7 @@ _set_conf_array() {
 	uci_path_array="$2"
 	jq_filter="$3"
 	reload_command="$4"
+	call_path="$5"
 
 	# Filter null values
 	jq_filter="[ .[] | $jq_filter ] | del(.[][] | select(. == \"null\"))"
@@ -277,7 +281,7 @@ _set_conf_array() {
 	uci_cmd="$(echo $uci_path | sed -n -r 's/(^[a-z]*)(\.)/\1 /p')"
 
 	# Check hash
-	if ! _check_hash "$uci_path" "$conf"; then
+	if ! _check_hash "$call_path" "$conf"; then
 		return 1
 	fi
 
@@ -327,7 +331,8 @@ _set_conf_array() {
 }
 
 _set_conf_firewall_rules() {
-	conf="$1"
+	local conf="$1"
+	local call_path="$2"
 
 	# TODO: Add automatic target
 	sconf="$(echo "$conf" | jq -r '[ .[] | {
@@ -343,7 +348,7 @@ _set_conf_firewall_rules() {
 		"id":        "\(.id)"
 	}] | del(.[][] | select(. == "null"))')"
 
-	_set_conf_array "$sconf" "firewall.@rule"
+	_set_conf_array "$sconf" "firewall.@rule" "$call_path"
 
 	if [ -n "$(uci changes)" ]; then
 		/etc/init.d/firewall reload
@@ -352,6 +357,7 @@ _set_conf_firewall_rules() {
 
 _set_conf_network_routes4(){
 	local conf="$1"
+	local call_path="$2"
 
 	local new_confs='[]'
 	local confs=
@@ -397,7 +403,7 @@ _set_conf_network_routes4(){
 		"mtu":       "\(.mtu)",
 		"table":     "\(.table)",
 		"type":      "\(.type)",
-	}'
+	}' "$call_path"
 }
 
 _apply_remote_conf() {
@@ -412,29 +418,28 @@ _apply_remote_conf() {
 		return 1
 	}
 
-	if [ "$url" = "dhcp/configs" ]; then
+	if [ "$url" = "dhcp/config" ]; then
 		_set_conf_static "dhcp" "dhcp" "$ret" \
-			"/etc/init.d/dnsmasq restart" "interface" \
-			'{
+			"/etc/init.d/dnsmasq restart" "interface" '{
 				"start":     "\(.offset)",
 				"limit":     "\(.poolSize)",
 				"leasetime": "\(.leaseDuration)",
 				"interface": "\(.interface)"
-			}'
+			}' 'dhcp/config'
 
-	elif [ "$url" = "dhcp/staticleases" ]; then
-		_set_conf_array "$ret" "dhcp.@host" '{
+	elif [ "$url" = "dhcp/staticlease" ]; then
+		_set_conf_array "$ret" 'dhcp.@host' '{
 			"name":     "\(.hostname)",
 			"mac":      "\(.mac)",
 			"ip":       "\(.ip)",
 			"id":       "\(.id)"
-		}' "/etc/init.d/dnsmasq restart"
+		}' '/etc/init.d/dnsmasq restart' 'dhcp/staticlease'
 
-	elif [ "$url" = "dns/nameservers" ]; then
+	elif [ "$url" = "dns/nameserver" ]; then
 		_set_conf_list "$ret" "server" "dhcp.@dnsmasq[0].server" \
-			"/etc/init.d/dnsmasq restart"
+			"/etc/init.d/dnsmasq restart" 'dns/nameserver'
 
-	elif [ "$url" = "firewall/redirects" ]; then
+	elif [ "$url" = "firewall/redirect" ]; then
 		_set_conf_array "$ret" "firewall.@redirect" '{
 			"name":      "\(.name)",
 
@@ -452,16 +457,15 @@ _apply_remote_conf() {
 			"id":        "\(.id)",
 			"proto":     "\(.proto)",
 			"target":    "\(.target)",
-		}' "/etc/init.d/firewall reload"
+		}' "/etc/init.d/firewall reload" "firewall/redirect"
 
 	# Special function used to find the network automaticaly
-	elif [ "$url" = "firewall/rules" ]; then
-		_set_conf_firewall_rules "$ret"
+	elif [ "$url" = "firewall/rule" ]; then
+		_set_conf_firewall_rules "$ret" 'firewall/rule'
 
-	elif [ "$url" = "network/interfaces" ]; then
-		_set_conf_static "network" "interface" "$ret" \
-		"/etc/init.d/network reload" "interfaceName" \
-		'{
+	elif [ "$url" = "network/interface" ]; then
+		_set_conf_static 'network' 'interface' "$ret" \
+		"/etc/init.d/network reload" "interfaceName"  '{
 				"ifname":   "\(.ifname)",
 				"ipaddr":   "\(.ipAddr)",
 				"netmask":  "\(.netmask)",
@@ -473,17 +477,17 @@ _apply_remote_conf() {
 				"ipv6":     "\(.ipv6)",
 				"source":   "\(.source)",
 				"type":     "\(.type)"
-		}'
+		}' 'network/interface'
 
 	# Special function used to find the network automaticaly
-	elif [ "$url" = "network/routes4" ]; then
-		_set_conf_network_routes4 "$ret"
+	elif [ "$url" = 'network/route4' ]; then
+		_set_conf_network_routes4 "$ret" 'network/route4'
 
-	elif [ "$url" = "network/routes6" ]; then
+	elif [ "$url" = 'network/route6' ]; then
 		_set_conf_static \
-			"network" "routes6" \
-			"$ret" "/etc/init.d/network reload" \
-			"name" '{
+			'network' 'routes6' \
+			"$ret" '/etc/init.d/network reload' \
+			'name' '{
 				"interface": "\(.interface)",
 				"target":    "\(.target)",
 				"gateway":   "\(.gateway)",
@@ -491,7 +495,7 @@ _apply_remote_conf() {
 				"mtu":       "\(.mtu)",
 				"table":     "\(.table)",
 				"type":      "\(.type)",
-			}'
+			}' 'network/route6'
 
 	else
 		echo "Missing conf type"
