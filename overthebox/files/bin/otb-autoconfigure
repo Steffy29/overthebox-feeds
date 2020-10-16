@@ -1,8 +1,7 @@
 #!/bin/sh
 # shellcheck disable=SC1090,SC1091,SC1066,SC1087,SC2086,SC2016,SC2039
 # vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4:
-ACS_URL=192.168.100.10:8080
-ACS_HASH_PATH=/tmp/acs_hash
+OCS_URL=192.168.100.10:8081
 
 . /lib/overthebox
 . /lib/functions/network.sh
@@ -10,7 +9,7 @@ ACS_HASH_PATH=/tmp/acs_hash
 _call_acs() {
 	curl -s -m 10 --fail \
 	-H "X-Auth-OVH: $OTB_TOKEN" \
-	-L "$ACS_URL/device/$OTB_DEVICE_ID/$1?version=$2"
+	-L "$OCS_URL/device/$OTB_DEVICE_ID/$1?version=$2"
 }
 
 _check_connect_acs() {
@@ -21,7 +20,7 @@ _check_connect_acs() {
 
 	local ret
 	logger "Checking connectivity"
-	if ! curl -s -m 10 --fail -L "$ACS_URL/ping" > /dev/null; then
+	if ! curl -s -m 10 --fail -L "$OCS_URL/ping" > /dev/null; then
 		logger "New conf is breaking network, reversing"
 
 		uci changes | grep -o  '[a-zA-Z]*\.' \
@@ -412,13 +411,19 @@ _apply_remote_conf() {
 
 	logger "Checking $url"
 
+	# If the configuration is in cache, do not fetch it
+	if grep "$url" "$ACS_HASH_PATH"; then
+		logger "$url is in cache"
+		return
+	fi
+
 	# Get conf JSON
 	ret="$(_call_acs "$url" "$version")" || {
 		logger "cannot reach $url"
 		return 1
 	}
 
-	if [ "$url" = "dhcp/config" ]; then
+	if [ "$url" = "/dhcp/config" ]; then
 		_set_conf_static "dhcp" "dhcp" "$ret" \
 			"/etc/init.d/dnsmasq restart" "interface" '{
 				"start":     "\(.offset)",
@@ -427,19 +432,19 @@ _apply_remote_conf() {
 				"interface": "\(.interface)"
 			}' 'dhcp/config'
 
-	elif [ "$url" = "dhcp/staticlease" ]; then
+	elif [ "$url" = "/dhcp/staticLease" ]; then
 		_set_conf_array "$ret" 'dhcp.@host' '{
 			"name":     "\(.hostname)",
 			"mac":      "\(.mac)",
 			"ip":       "\(.ip)",
 			"id":       "\(.id)"
-		}' '/etc/init.d/dnsmasq restart' 'dhcp/staticlease'
+		}' '/etc/init.d/dnsmasq restart' 'dhcp/staticLease'
 
-	elif [ "$url" = "dns/nameserver" ]; then
+	elif [ "$url" = "/dns/nameserver" ]; then
 		_set_conf_list "$ret" "server" "dhcp.@dnsmasq[0].server" \
 			"/etc/init.d/dnsmasq restart" 'dns/nameserver'
 
-	elif [ "$url" = "firewall/redirect" ]; then
+	elif [ "$url" = "/firewall/redirect" ]; then
 		_set_conf_array "$ret" "firewall.@redirect" '{
 			"name":      "\(.name)",
 
@@ -460,10 +465,10 @@ _apply_remote_conf() {
 		}' "/etc/init.d/firewall reload" "firewall/redirect"
 
 	# Special function used to find the network automaticaly
-	elif [ "$url" = "firewall/rule" ]; then
+	elif [ "$url" = "/firewall/rule" ]; then
 		_set_conf_firewall_rules "$ret" 'firewall/rule'
 
-	elif [ "$url" = "network/interface" ]; then
+	elif [ "$url" = "/network/interface" ]; then
 		_set_conf_static 'network' 'interface' "$ret" \
 		"/etc/init.d/network reload" "interfaceName"  '{
 				"ifname":   "\(.ifname)",
@@ -480,10 +485,10 @@ _apply_remote_conf() {
 		}' 'network/interface'
 
 	# Special function used to find the network automaticaly
-	elif [ "$url" = 'network/route4' ]; then
+	elif [ "$url" = '/network/route4' ]; then
 		_set_conf_network_routes4 "$ret" 'network/route4'
 
-	elif [ "$url" = 'network/route6' ]; then
+	elif [ "$url" = '/network/route6' ]; then
 		_set_conf_static \
 			'network' 'routes6' \
 			"$ret" '/etc/init.d/network reload' \
@@ -513,16 +518,14 @@ _run() {
 		return
 	fi
 
-	# TODO: Add local domains
-
-	_apply_remote_conf "1" "dhcp/configs"
-	_apply_remote_conf "1" "dhcp/staticleases"
-	_apply_remote_conf "1" "dns/nameservers"
-	_apply_remote_conf "1" "firewall/redirects"
-	_apply_remote_conf "1" "firewall/rules"
-	_apply_remote_conf "1" "network/interfaces"
-	_apply_remote_conf "1" "network/routes4"
-	_apply_remote_conf "1" "network/routes6"
+	_apply_remote_conf "1" "/dhcp/config"
+	_apply_remote_conf "1" "/dhcp/staticLease"
+	_apply_remote_conf "1" "/dns/nameserver"
+	_apply_remote_conf "1" "/firewall/redirect"
+	_apply_remote_conf "1" "/firewall/rule"
+	_apply_remote_conf "1" "/network/interface"
+	_apply_remote_conf "1" "/network/route4"
+	_apply_remote_conf "1" "/network/route6"
 }
 
 _run

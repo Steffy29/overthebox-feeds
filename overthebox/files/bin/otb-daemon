@@ -37,6 +37,8 @@ _run() {
 		[ -f "$file" ] && (. "$file") && rm -f "$file"
 	done
 
+	otb-autoconfigure
+
 	ret=$(otb_device_get actions --dump-header "$OTB_HEADERS_FILE") || return
 
 	if [ -z "$OTB_SERVICE_ID" ]; then
