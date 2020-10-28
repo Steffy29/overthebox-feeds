@@ -403,6 +403,23 @@ _set_conf_network_routes4(){
 	}' "$call_path"
 }
 
+_restart_dnsmasq() {
+	pid="$(pgrep dnsmasq)"
+
+	/etc/init.d/dnsmasq restart
+
+	i=0
+	while [ "$i" -lt "10" ]; do
+		npid="$(pgrep dnsmasq)"
+		if [ -n "$npid" ] && [ "$pid" != "$npid" ]; then
+			break
+		fi
+		sleep 1
+	done
+
+	echo "0"
+}
+
 _apply_remote_conf() {
 	version="$1"
 	url="$2"
@@ -424,7 +441,7 @@ _apply_remote_conf() {
 
 	if [ "$url" = "/dhcp/config" ]; then
 		_set_conf_static "dhcp" "dhcp" "$ret" \
-			"/etc/init.d/dnsmasq restart" "interface" '{
+			"_restart_dnsmasq" "interface" '{
 				"start":     "\(.offset)",
 				"limit":     "\(.poolSize)",
 				"leasetime": "\(.leaseDuration)",
