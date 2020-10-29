@@ -13,6 +13,7 @@ _call_acs() {
 }
 
 _check_connect_acs() {
+	reload_command="$1"
 	if [ -z "$(uci changes)" ]; then
 		logger "No changes, no need to check"
 		return 0
@@ -26,6 +27,8 @@ _check_connect_acs() {
 		uci changes | grep -o  '[a-zA-Z]*\.' \
 		| sed 's/\.$//' | sort | uniq \
 		| xargs -n 1 uci revert
+
+		eval "$reload_command"
 
 		return 1
 	fi
@@ -137,7 +140,7 @@ _set_conf_single_static() {
 	local conf="$1"
 	local uci_path="$2"
 	local conf_type="$3"
-	local call_path="$5"
+	local call_path="$4"
 
 	# Remove empty values and add "generatedby"
 	conf="$(echo $conf | jq 'del(.[] | select(. == "null")) | . + {"generatedby": "autoconfigure"}')"
@@ -355,6 +358,7 @@ _set_conf_firewall_rules() {
 _set_conf_network_routes4(){
 	local conf="$1"
 	local call_path="$2"
+	local reload_command="$3"
 
 	local new_confs='[]'
 	local confs=
@@ -390,7 +394,7 @@ _set_conf_network_routes4(){
 	fi
 
 	_set_conf_static "network" "route" "$new_confs" \
-	"/etc/init.d/network reload" "name" '{
+	"$reload_command" "name" '{
 		"interface": "\(.interface)",
 		"name":      "\(.name)",
 		"target":    "\(.target)",
@@ -440,8 +444,9 @@ _apply_remote_conf() {
 	}
 
 	if [ "$url" = "/dhcp/config" ]; then
+		reload_command="_restart_dnsmasq"
 		_set_conf_static "dhcp" "dhcp" "$ret" \
-			"_restart_dnsmasq" "interface" '{
+			"$reload_command" "interface" '{
 				"start":     "\(.offset)",
 				"limit":     "\(.poolSize)",
 				"leasetime": "\(.leaseDuration)",
@@ -449,25 +454,29 @@ _apply_remote_conf() {
 			}' '/dhcp/config'
 
 	elif [ "$url" = "/dhcp/staticLease" ]; then
-		_set_conf_array "$ret" 'dhcp.@host' '{
+		reload_command="_restart_dnsmasq"
+		_set_conf_array "$ret" "dhcp.@host" '{
 			"name":     "\(.hostname)",
 			"mac":      "\(.mac)",
 			"ip":       "\(.ip)",
 			"id":       "\(.id)"
-		}' '_restart_dnsmasq'  '/dhcp/staticLease'
+		}' "$reload_command"  "/dhcp/staticLease"
 
 	elif [ "$url" = "/dns/localDomain" ]; then
+		reload_command="_restart_dnsmasq"
 		_set_conf_array "$ret" 'dhcp.@domain' '{
 			"name": "\(.hostname)",
 			"ip":   "\(.ip)",
 			"id":   "\(.id)"
-		}' '_restart_dnsmasq'  '/dns/localDomain'
+		}' "$reload_command"  '/dns/localDomain'
 
 	elif [ "$url" = "/dns/nameserver" ]; then
+		reload_command="_restart_dnsmasq"
 		_set_conf_list "$ret" "server" "dhcp.@dnsmasq[0].server" \
-			'_restart_dnsmasq'  '/dns/nameserver'
+			"$reload_command"  '/dns/nameserver'
 
 	elif [ "$url" = "/firewall/redirect" ]; then
+		reload_command="/etc/init.d/firewall reload"
 		_set_conf_array "$ret" "firewall.@redirect" '{
 			"name":      "\(.name)",
 
@@ -485,10 +494,11 @@ _apply_remote_conf() {
 			"id":        "\(.id)",
 			"proto":     "\(.proto)",
 			"target":    "\(.target)",
-		}' "/etc/init.d/firewall reload" "/firewall/redirect"
+		}' "$reload_command" "/firewall/redirect"
 
 	# Special function used to find the network automaticaly
 	elif [ "$url" = "/firewall/rule" ]; then
+		reload_command="/etc/init.d/firewall reload"
 		_set_conf_array "$ret" "firewall.@rule" '{
 			"name":      "\(.name)",
 			"target":    "\(.target)",
@@ -500,11 +510,12 @@ _apply_remote_conf() {
 			"proto":     "\(.proto)",
 			"src_ip":    "\(.srcIP)",
 			"id":        "\(.id)"
-		}' "/etc/init.d/firewall reload" "/firewall/rule"
+		}' "$reload_command" "/firewall/rule"
 
 	elif [ "$url" = "/network/interface" ]; then
+		reload_command="/etc/init.d/network reload"
 		_set_conf_static 'network' 'interface' "$ret" \
-		"/etc/init.d/network reload" "interfaceName"  '{
+		"$reload_command" "interfaceName"  '{
 				"ifname":   "\(.ifname)",
 				"ipaddr":   "\(.ipAddr)",
 				"netmask":  "\(.netmask)",
@@ -520,12 +531,14 @@ _apply_remote_conf() {
 
 	# Special function used to find the network automaticaly
 	elif [ "$url" = '/network/route4' ]; then
-		_set_conf_network_routes4 "$ret" '/network/route4'
+		reload_command="/etc/init.d/network reload"
+		_set_conf_network_routes4 "$ret" '/network/route4' "$reload_command"
 
 	elif [ "$url" = '/network/route6' ]; then
+		reload_command="/etc/init.d/network reload"
 		_set_conf_static \
 			'network' 'routes6' \
-			"$ret" '/etc/init.d/network reload' \
+			"$ret" "$reload_command" \
 			'name' '{
 				"interface": "\(.interface)",
 				"target":    "\(.target)",
@@ -540,7 +553,7 @@ _apply_remote_conf() {
 		echo "Missing conf type"
 	fi
 
-	_check_connect_acs "$uci_path" || return
+	_check_connect_acs "$reload_command" || return
 
 	uci commit
 }
