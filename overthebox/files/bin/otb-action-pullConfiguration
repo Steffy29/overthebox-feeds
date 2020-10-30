@@ -7,14 +7,14 @@
 path="$(otb_json_get "$1" arguments.path)"
 if [ -z "$path" ] || [ "$path" = "null" ]; then
 	otb_info "Cleaning all the cache"
-	echo "" > "$ACS_HASH_PATH"
+	echo "" > "$ACS_CACHE_PATH"
 	return
 fi
 
 otb_info "Removing $path from cache"
 
 tmp_file="$(mktemp)"
-grep -v "$path" "$ACS_HASH_PATH" > "$tmp_file"
-mv "$tmp_file" "$ACS_HASH_PATH"
+grep -v "$path" "$ACS_CACHE_PATH" > "$tmp_file"
+mv "$tmp_file" "$ACS_CACHE_PATH"
 
 otb-autoconfigure
