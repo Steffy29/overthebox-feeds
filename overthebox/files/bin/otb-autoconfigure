@@ -6,10 +6,36 @@ OCS_URL=192.168.100.10:8081
 . /lib/overthebox
 . /lib/functions/network.sh
 
-_call_acs() {
+_ocs_get() {
+	path="$1"
 	curl -s -m 10 --fail \
 	-H "X-Auth-OVH: $OTB_TOKEN" \
-	-L "$OCS_URL/device/$OTB_DEVICE_ID/$1?version=$2"
+	-H "X-Overthebox-Version: $(cat /etc/otb-version || echo 0.0-0)" \
+	-L "$OCS_URL/device/$OTB_DEVICE_ID/ocs/$path"
+}
+
+_ocs_post(){
+	path="$1"
+	content="$2"
+	curl --silent --show-error --max-time 5 \
+		-X "POST" \
+		-H "Content-Type: application/json" \
+		-H "X-Auth-OVH: $OTB_TOKEN" \
+		-H "X-Overthebox-Version: $(cat /etc/otb-version || echo 0.0-0)" \
+		-L "$OCS_URL/device/$OTB_DEVICE_ID/ocs/$path"
+		"$content"
+}
+
+
+_pull_config() {
+	_ocs_get "config/get$1?version=$2"
+}
+
+_update_conf_status() {
+	conf_path="$1"
+	status="$2"
+
+	_ocs_post "status/set$conf_path/$status"
 }
 
 _check_connect_acs() {
@@ -19,19 +45,11 @@ _check_connect_acs() {
 		return 0
 	fi
 
-	local ret
 	logger "Checking connectivity"
-	if ! curl -s -m 10 --fail -L "$OCS_URL/ping" > /dev/null; then
-		logger "New conf is breaking network, reversing"
+	local ret=0
+	curl -s -m 10 --fail -L "$OCS_URL/ping" > /dev/null || ret=$?
 
-		uci changes | grep -o  '[a-zA-Z]*\.' \
-		| sed 's/\.$//' | sort | uniq \
-		| xargs -n 1 uci revert
-
-		eval "$reload_command"
-
-		return 1
-	fi
+	return $ret
 }
 
 # Deletes a conf if it's on the device but not in the conf sent by the server
@@ -428,7 +446,7 @@ _apply_remote_conf() {
 	fi
 
 	# Get conf JSON
-	ret="$(_call_acs "$url" "$version")" || {
+	ret="$(_pull_config "$url" "$version")" || {
 		logger "cannot reach $url"
 		return 1
 	}
@@ -543,7 +561,20 @@ _apply_remote_conf() {
 		echo "Missing conf type"
 	fi
 
-	_check_connect_acs "$reload_command" || return
+	if ! _check_connect_acs "$reload_command"; then
+		logger "New conf is breaking network, reversing"
+
+		uci changes | grep -o  '[a-zA-Z]*\.' \
+		| sed 's/\.$//' | sort | uniq \
+		| xargs -n 1 uci revert
+
+		eval "$reload_command"
+
+		_update_conf_status "$url" "problem"
+		return
+	fi
+
+	_update_conf_status "$url" "ok"
 
 	uci commit
 }
