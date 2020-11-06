@@ -524,17 +524,18 @@ _apply_remote_conf() {
 		reload_command="/etc/init.d/network reload"
 		_set_conf_static 'network' 'interface' "$ret" \
 		"$reload_command" "interfaceName"  '{
-				"ifname":   "\(.ifname)",
-				"ipaddr":   "\(.ipAddr)",
-				"netmask":  "\(.netmask)",
-				"gateway":  "\(.gateway)",
-				"mtu":      "\(.mtu)",
-				"ip4table": "\(.ip4table)",
-				"ip6table": "\(.ip6table)",
-				"proto":	"\(.proto)",
-				"ipv6":     "\(.ipv6)",
-				"source":   "\(.source)",
-				"type":     "\(.type)"
+				"gateway":   "\(.gateway)",
+				"ifname":    "\(.ifname)",
+				"ip4table":  "\(.ip4table)",
+				"ip6table":  "\(.ip6table)",
+				"ipaddr":    "\(.ipAddr)",
+				"ipv6":      "\(.ipv6)",
+				"mtu":       "\(.mtu)",
+				"multipath": "\(.multipath)",
+				"netmask":   "\(.netmask)",
+				"proto":     "\(.proto)",
+				"source":    "\(.source)",
+				"type":      "\(.type)"
 		}' '/network/interface'
 
 	# Special function used to find the network automaticaly
