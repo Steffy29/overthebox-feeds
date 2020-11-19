@@ -26,7 +26,6 @@ _ocs_post(){
 		"$content"
 }
 
-
 _pull_config() {
 	_ocs_get "config/get$1?version=$2"
 }
@@ -583,18 +582,22 @@ _apply_remote_conf() {
 _run() {
 	otb_reload
 
+	#OTB_DEVICE_ID="a5def614-0f23-4c17-a72b-f8d7704ce070"
+	#OTB_TOKEN='$aes$5mxLGiBQaM2GMrpWH6RS7OV7r37L1P+Ip3WKeWL6AxyGK5ATq9vO/P2r/4wkMwTOg5ZEGw=='
+
 	if [ -z "$OTB_DEVICE_ID" ]; then
+		logger "no device id in autoconfigure"
 		return
 	fi
 
 	_apply_remote_conf "1" "/dhcp/config"
 	_apply_remote_conf "1" "/dhcp/staticLease"
+	_apply_remote_conf "1" "/dns/localDomain"
 	_apply_remote_conf "1" "/dns/nameserver"
 	_apply_remote_conf "1" "/firewall/redirect"
 	_apply_remote_conf "1" "/firewall/rule"
 	_apply_remote_conf "1" "/network/interface"
 	_apply_remote_conf "1" "/network/route4"
-	_apply_remote_conf "1" "/network/route6"
+	#_apply_remote_conf "1" "/network/route6"
 }
-
 _run
