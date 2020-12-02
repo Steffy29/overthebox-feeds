@@ -21,8 +21,7 @@ _ocs_post(){
 		-X "POST" \
 		-H "Content-Type: application/json" \
 		-H "X-Auth-OVH: $OTB_TOKEN" \
-		-H "X-Overthebox-Version: $(cat /etc/otb-version || echo 0.0-0)" \
-		-L "$OCS_URL/device/$OTB_DEVICE_ID/ocs/$path"
+		-L "$OCS_URL/device/$OTB_DEVICE_ID/ocs/$path" \
 		"$content"
 }
 

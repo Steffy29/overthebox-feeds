@@ -8,10 +8,8 @@ OTB_CONFIG_CHECK_DIR="/usr/share/otb/config-check.d"
 ACS_CACHE_PATH="/tmp/acs-cache"
 
 OCS_URL=193.70.47.113:8081
-OTB_PROVISIONING="193.70.47.113:8082"
-#OTB_PROVISIONING_IP="213.186.33.11"
-#OTB_PROVISIONING="provisionning.overthebox.net:4443"
-#OTB_PROVISIONING_IP="213.186.33.11"
+OTB_PROVISIONING_IP="213.186.33.11"
+OTB_PROVISIONING="provisionning.overthebox.net:4443"
 
 mkdir -p "$OTB_DATA_DIR" "$OTB_TODO_DIR"
 
@@ -62,7 +60,7 @@ otb_json_get() {
 	jq -r -n --argjson content "$1" "\$content.$2"
 }
 
-otb_call() {
+otb_call_prod() {
 	method=$1
 	path=$2
 	shift 2
@@ -72,8 +70,34 @@ otb_call() {
 		-H "Content-Type: application/json" \
 		-H "X-Auth-OVH: $OTB_TOKEN" \
 		-H "X-Overthebox-Version: $(cat /etc/otb-version || echo 0.0-0)" \
+		-H "X-Overthebox-Configuration-Mode: $(get_otb_config_mode)" \
+		--resolve "$OTB_PROVISIONING:$OTB_PROVISIONING_IP" \
+		"https://$OTB_PROVISIONING/$path" \
+		"$@"
+}
+
+otb_call_dev() {
+	method=$1
+	path=$2
+	shift 2
+	otb_debug "call: $method $path $*"
+	OTB_PROVISIONING="192.168.100.10:8082"
+	curl --silent --show-error --max-time 5 \
+		-X "$method" \
+		-H "Content-Type: application/json" \
+		-H "X-Auth-OVH: $OTB_TOKEN" \
+		-H "X-Overthebox-Version: $(cat /etc/otb-version || echo 0.0-0)" \
+		-H "X-Overthebox-Configuration-Mode: $(get_otb_config_mode)" \
 		"http://$OTB_PROVISIONING/$path" \
 		"$@"
+}
+
+otb_call() {
+	otb_call_dev "$@"
+}
+
+get_otb_config_mode() {
+	[ "$(uci get uhttpd.main.home)" = "/otb-web" ] && echo "autoconfigure" || echo "legacy"
 }
 
 otb_call_api() {
